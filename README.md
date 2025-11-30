@@ -310,28 +310,23 @@ This is the recommended setup for enterprise identity.
 
 ---
 
-# 11. Full Project Documentation
+# 11. Full Documentation
 
-This README covers the essentials.  
-Full documentation is stored under:
+All expanded documentation is available in the `docs/` directory:
 
-```
-/docs
-```
+- [00 – Introduction](docs/00-introduction.md)
+- [01 – Deployment Guide](docs/01-deployment.md)
+- [02 – Authentication Modes](docs/02-authentication-modes.md)
+- [03 – Helix Integration](docs/03-helix-integration.md)
+- [04 – Grafana Integration](docs/04-grafana-integration.md)
+- [05 – Webhooks](docs/05-webhooks.md)
+- [06 – RSSO / HSSO / OIDC Guide](docs/06-rsso-hsso-oidc.md)
+- [07 – Architecture Overview](docs/07-architecture.md)
+- [08 – Troubleshooting](docs/08-troubleshooting.md)
+- [09 – API Reference](docs/09-api-reference.md)
+- [10 – Security Guide](docs/10-security.md)
 
-Including:
-
-- Introduction  
-- Deployment Guide  
-- Authentication Modes  
-- Helix Integration  
-- Grafana Integration  
-- Webhooks  
-- RSSO/HSSO/OIDC Guide  
-- Architecture  
-- Troubleshooting  
-- API Reference  
-- Security Hardening  
+Each section contains detailed explanations, examples, diagrams, and configuration snippets.
 
 ---
 
