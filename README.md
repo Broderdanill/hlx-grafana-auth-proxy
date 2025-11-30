@@ -25,7 +25,7 @@ The purpose is to:
 - `ConfigMap`: general configuration
 - `Secret`: stores Helix service account credentials
 - `PVC`: persistent storage for Grafana data
-- `Pod`: runs Grafana and the auth proxy together
+- `Pod`: runs Grafana and the auth proxy containers together
 
 ## Important Environment Variables
 
@@ -81,6 +81,31 @@ RSSO_HEADER_NAME=X-RSSO-USER
 ```
 2. Your reverse proxy must set the header with the Helix username.
 
-## Files
-- `README_sv.md` – Swedish version
-- `README_en.md` – English version
+
+## Grafana - Data Source
+This default set up is using "marcusolsson-json-datasource" as data source
+Below are some examples on how to use it.
+
+### Path
+Path defines the AR Form Name, for example:
+/User
+/Group
+
+### Fields
+The data source will get the complete json, therefor we need to specify correct path, for example:
+entries[*].values.Full Name   -  Full Name Field in User Form
+
+JSONata
+JSONata är ett uttrycksspråk för att transformera JSON-data.
+Tänk:
+
+JSON → transformera → nytt JSON
+filtrera
+gruppera
+mappa om fält
+räkna saker
+skapa nya objekt
+slå ihop fält
+summera
+byta struktur helt
+Och JSON API-pluginet låter dig köra JSONata direkt på resultatet från din HTTP-endpoint.

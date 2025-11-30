@@ -1,6 +1,6 @@
 #############################################
-# ConfigMap: Provisionerar Grafana-datakälla
-# Använder JSON API-pluginet mot vår proxy
+# ConfigMap: Provision Grafana data source
+# Uses JSON API plugin against our auth proxy
 #############################################
 apiVersion: v1
 kind: ConfigMap
@@ -14,22 +14,24 @@ data:
       - name: Helix REST (JSON API)
         type: marcusolsson-json-datasource
         access: proxy
-        # Viktigt:
-        #  - Grafana backend (dataproxy) anropar denna URL
-        #  - URL pekar på vår FastAPI-proxy i samma pod
+        # Important:
+        #  - Grafana backend (data proxy) will call this URL
+        #  - The URL points to our FastAPI proxy inside the same pod
         url: http://127.0.0.1:8080/helix-api
         isDefault: false
         jsonData: {}
+
+
 ---
 #############################################
-# ConfigMap: Helix + Auth-konfiguration
+# ConfigMap: Helix + Auth configuration
 #
-# Här lägger du allt som styr:
-#  - vilken Helix-bas-URL som används
-#  - vilka formulär som är tillåtna
-#  - hur grupper mappas till Grafana-roller
-#  - hur User-formuläret och fält heter
-#  - om du kör AUTH_MODE=local eller AUTH_MODE=rsso
+# Here you configure:
+#  - Helix base URL
+#  - Which forms are allowed
+#  - How groups map to Grafana roles
+#  - Which Helix form/fields are used for groups
+#  - Whether we use AUTH_MODE=local or AUTH_MODE=rsso
 #############################################
 apiVersion: v1
 kind: ConfigMap
@@ -37,85 +39,87 @@ metadata:
   name: helix-grafana-auth-config
 data:
   ###########################################
-  # Helix REST-bas + JWT-login
+  # Log level for the hlx-grafana-auth-proxy
+  # Allowed values: DEBUG, INFO, WARNING, ERROR, CRITICAL
   ###########################################
-  LOG_LEVEL: "INFO"
+  LOG_LEVEL: "DEBUG"
 
   ###########################################
-  # Helix REST-bas + JWT-login
+  # Helix REST base URL + JWT login endpoint
   ###########################################
   HELIX_BASE_URL: "http://arserver:8008"
   HELIX_JWT_LOGIN_URL: "http://arserver:8008/api/jwt/login"
 
   ###########################################
-  # Whitelist av Helix-formulär som får nås
-  # från Grafana via /helix-api/<form>.
+  # Whitelist of Helix forms that can be queried
+  # from Grafana via /helix-api/<form>.
   #
-  # Här kan du lägga till t.ex. HPD:IncidentInterface
+  # Example to allow incidents:
   # HELIX_ALLOWED_FORMS: "User,Group,HPD:IncidentInterface"
   ###########################################
   HELIX_ALLOWED_FORMS: "User,Group"
 
   ###########################################
-  # Grupp → Grafana-roll-mappning
+  # Helix group → Grafana role mapping
   #
   # Format: "groupId:Role,groupId:Role,..."
-  # Roller måste vara exakt: Viewer, Editor, Admin
+  # Roles must be exactly: Viewer, Editor, Admin
   #
-  # Exempel:
-  #  400001 (Helix-grupp) → Viewer
+  # Example:
+  #  400001 (Helix group) → Viewer
   #  400002 → Editor
   #  400003 → Admin
   ###########################################
   HELIX_GROUP_ROLE_MAPPING: "400001:Viewer,400002:Editor,400003:Admin"
 
   ###########################################
-  # Formulär + fält för att läsa användarens grupp-lista
+  # Form + fields used to read the user's group list
   #
   # HELIX_USER_FORM:
-  #   Formuläret där användarens grupper ligger (oftast "User")
+  #   Form that contains the user's groups (usually "User")
   #
   # HELIX_USER_LOGIN_FIELD:
-  #   Fältet som innehåller login-namnet (t.ex. "Login Name")
+  #   Field that contains the Helix login name (e.g. "Login Name")
   #
   # HELIX_USER_GROUP_FIELD:
-  #   Fältet som innehåller grupp-listan (t.ex. "Group List")
-  #   Värdet ser ut ungefär: "1;400003;12321;"
+  #   Field that contains the group list string (e.g. "Group List")
+  #   Example value: "1;400003;12321;"
   ###########################################
   HELIX_USER_FORM: "User"
   HELIX_USER_LOGIN_FIELD: "Login Name"
   HELIX_USER_GROUP_FIELD: "Group List"
 
   ###########################################
-  # Defaultroll om ingen matchande grupp hittas
-  # eller om Helix-queryn misslyckas.
+  # Default Grafana role if:
+  #  - no matching group is found, or
+  #  - Helix query fails.
   ###########################################
   HELIX_DEFAULT_GRAFANA_ROLE: "Viewer"
 
   ###########################################
-  # Autentiseringsläge för proxy:
+  # Authentication mode for the proxy:
   #
-  #  - local (default): egen login-sida mot Helix JWT-login
-  #  - rsso: användare autentiseras via RSSO framför,
-  #          denna app läser användarnamn från RSSO_HEADER_NAME
+  #  - local (default): own login page against Helix JWT login
+  #  - rsso: user is authenticated by RSSO in front of this app,
+  #          this service reads the username from RSSO_HEADER_NAME
   #
-  # För RSSO-läge:
+  # For RSSO mode:
   #   AUTH_MODE: "rsso"
-  #   RSSO_HEADER_NAME: "X-RSSO-USER"  (eller vad din proxy sätter)
+  #   RSSO_HEADER_NAME: "X-RSSO-USER"  (or whatever your proxy sets)
   ###########################################
   AUTH_MODE: "local"
   RSSO_HEADER_NAME: "X-RSSO-USER"
 ---
 #############################################
-# Secret: Helix servicekonto (admin user)
+# Secret: Helix service account (admin user)
 #
-# Här lägger du det "känsliga":
+# Here you store sensitive data:
 #  - HELIX_ADMIN_USER
 #  - HELIX_ADMIN_PASSWORD
 #
-# I labb kan du använda stringData så här.
-# I produktion kan du skapa / uppdatera Secret separat
-# med podman/kubectl.
+# In a lab environment you can use stringData like this.
+# In production you would typically create/update this Secret
+# separately with kubectl/podman.
 #############################################
 apiVersion: v1
 kind: Secret
@@ -148,30 +152,35 @@ kind: Pod
 metadata:
   name: helix-grafana-pod
   annotations:
-    podman.io/network: helix   # Anslut till befintligt "helix"-nät i podman
+    podman.io/network: helix   # Attach to existing "helix" network in podman
 spec:
   containers:
     #########################################
-    # GRAFANA-CONTAINER
+    # GRAFANA CONTAINER
     #########################################
     - name: grafana
       image: docker.io/grafana/grafana:latest
       env:
-        # Installera JSON API-datasource plugin
+        # Install JSON API data source plugin
         - name: GF_INSTALL_PLUGINS
-          value: "marcusolsson-json-datasource"
+        #  value: "marcusolsson-json-datasource"
+          value: "marcusolsson-json-datasource,grafana-clock-panel"
 
-        # Grundläggande serverinställningar
+        # Basic server settings
         - name: GF_SERVER_ROOT_URL
           value: "%(protocol)s://%(domain)s:%(http_port)s/"
         - name: GF_SERVER_SERVE_FROM_SUB_PATH
           value: "false"
 
+        # Disable Grafana Live (real-time WebSocket streaming)
+        - name: GF_LIVE_ENABLED
+          value: "false"
+
         ##################################################
-        # Auth proxy-mode:
-        #  - vår hlx-grafana-auth-proxy skickar X-WEBAUTH-USER
-        #    och X-WEBAUTH-ROLE till Grafana
-        #  - Grafana använder detta som användarnamn + roll
+        # Auth proxy mode:
+        #  - hlx-grafana-auth-proxy sends X-WEBAUTH-USER
+        #    and X-WEBAUTH-ROLE to Grafana
+        #  - Grafana uses this as username + role
         ##################################################
         - name: GF_AUTH_PROXY_ENABLED
           value: "true"
@@ -182,22 +191,23 @@ spec:
         - name: GF_AUTH_PROXY_AUTO_SIGN_UP
           value: "true"
 
-        # Koppla in roll-headern:
-        # Detta betyder: "Role"-attributet ska hämtas från HTTP-headern X-WEBAUTH-ROLE
+        # Map Role attribute from HTTP header X-WEBAUTH-ROLE
         - name: GF_AUTH_PROXY_HEADERS
           value: "Role:X-WEBAUTH-ROLE"
 
-        # Viktigt: skicka även grafana-username tillbaka till datakällan
-        # i headern X-Grafana-User (används av vår FastAPI för impersonation)
+        # Important: also send Grafana username back to the data source
+        # in header X-Grafana-User (used by the FastAPI proxy for impersonation)
         - name: GF_DATAPROXY_SEND_USER_HEADER
           value: "true"
+        - name: GF_DATAPROXY_USER_HEADER_NAME
+          value: "X-Grafana-User"
 
-        # Default-rollen för nya användare om ingen roll sätts från headern
-        # (vår proxy försöker dock alltid skicka X-WEBAUTH-ROLE)
+        # Default org role for new users if no role is set from header
+        # (our proxy tries to always send X-WEBAUTH-ROLE)
         - name: GF_USERS_AUTO_ASSIGN_ORG_ROLE
           value: "Viewer"
 
-        # (valfritt: admin-konto för fallback)
+        # Optional: admin account inside Grafana
         - name: GF_SECURITY_ADMIN_USER
           value: "admin"
         - name: GF_SECURITY_ADMIN_PASSWORD
@@ -208,10 +218,10 @@ spec:
           protocol: TCP
 
       volumeMounts:
-        # Mounta ConfigMap som provisioning-fil för datasourcen
+        # Mount ConfigMap as provisioning file for the data source
         - name: grafana-datasources
           mountPath: /etc/grafana/provisioning/datasources
-        # Persistent lagring för dashboards, users, etc
+        # Persistent storage for dashboards, users, etc
         - name: grafana-storage
           mountPath: /var/lib/grafana
 
@@ -221,21 +231,21 @@ spec:
     - name: hlx-grafana-auth-proxy
       image: localhost/hlx-grafana-auth-proxy:latest
       env:
-        # Intern URL där Grafana nås från proxyn
+        # Internal URL where Grafana is reachable from the proxy
         - name: GRAFANA_INTERNAL_URL
           value: "http://127.0.0.1:3000"
 
-      # Hämta alla övriga auth-/Helix-inställningar från ConfigMap
+      # Load all Helix/auth settings from ConfigMap...
       envFrom:
         - configMapRef:
             name: helix-grafana-auth-config
-        # ...och hämta känsliga värden från Secret
+        # ...and load sensitive values from Secret
         - secretRef:
             name: helix-admin-credentials
 
       ports:
         - containerPort: 8080
-          hostPort: 8081   # Exponera proxyn på host:8081
+          hostPort: 8081   # Expose the proxy on host:8081
           protocol: TCP
 
   volumes:

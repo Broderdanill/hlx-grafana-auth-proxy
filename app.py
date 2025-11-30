@@ -1,10 +1,12 @@
 import os
 import base64
 import logging
+import asyncio
 from typing import Optional, Dict
 
-from fastapi import FastAPI, Request, Response, Form
+from fastapi import FastAPI, Request, Response, Form, WebSocket
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
+from fastapi.websockets import WebSocketDisconnect
 import httpx
 
 # =========================
@@ -114,7 +116,6 @@ def parse_group_role_mapping(value: str) -> Dict[str, str]:
 ALLOWED_FORMS = parse_form_whitelist(RAW_ALLOWED_FORMS)
 GROUP_ROLE_MAPPING = parse_group_role_mapping(RAW_GROUP_ROLE_MAPPING)
 
-logger.info(f"LOG_LEVEL: {LOG_LEVEL}")
 logger.info(f"Allowed Helix forms: {ALLOWED_FORMS}")
 logger.info(f"AUTH_MODE: {AUTH_MODE}, RSSO_HEADER_NAME: {RSSO_HEADER_NAME}")
 logger.debug(f"GROUP_ROLE_MAPPING: {GROUP_ROLE_MAPPING}")
@@ -160,18 +161,20 @@ def resolve_username(request: Request) -> Optional[str]:
     3) HLX_USER cookie
        - Only set in "local" mode (manual login via /login).
     """
+    logger.debug(f"resolve_username: headers={dict(request.headers)}")
+
     # 1. Backend request from Grafana dataproxy
     hdr = request.headers.get("X-Grafana-User")
     if hdr:
         return hdr
 
-    # 2. RSSO mode: trust header from reverse proxy
+    # 2. RSSO mode
     if AUTH_MODE == "rsso":
         hdr = request.headers.get(RSSO_HEADER_NAME)
         if hdr:
             return hdr
 
-    # 3. Fallback: our own cookie (mainly in local mode)
+    # 3. Fallback: cookie
     return request.cookies.get(HELIX_USER_COOKIE)
 
 
@@ -444,13 +447,21 @@ async def proxy_to_grafana(path: str, request: Request) -> Response:
 
     body = await request.body()
 
-    async with httpx.AsyncClient(follow_redirects=False, verify=False) as client:
-        grafana_resp = await client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            content=body,
-            params=request.query_params,
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, verify=False) as client:
+            grafana_resp = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                content=body,
+                params=request.query_params,
+            )
+    except httpx.RequestError as e:
+        logger.error(f"Error calling Grafana at {url}: {e}")
+        return HTMLResponse(
+            f"Kunde inte nå Grafana på {GRAFANA_INTERNAL_URL}. "
+            "Troligen startar Grafana fortfarande eller är nedstängd.",
+            status_code=502,
         )
 
     excluded_headers = {"content-encoding", "transfer-encoding", "connection"}
@@ -726,7 +737,7 @@ async def login_form(request: Request):
               </div>
               <h1>Helix Grafana Proxy</h1>
               <p class="subtitle">
-                Log in with your <span>Helix account</span> for dashboard access.
+                Logga in med ditt <span>Helix-konto</span> för att komma åt dashboards.
               </p>
             </div>
             <div class="brand-mark">
@@ -737,24 +748,24 @@ async def login_form(request: Request):
 
           <form method="post" action="/login">
             <div class="field">
-              <label for="username">Username</label>
+              <label for="username">Användarnamn</label>
               <input
                 type="text"
                 id="username"
                 name="username"
-                placeholder="ex. jdoe"
+                placeholder="t.ex. jdoe"
                 autocomplete="username"
                 required
               />
             </div>
 
             <div class="field">
-              <label for="password">Password</label>
+              <label for="password">Lösenord</label>
               <input
                 type="password"
                 id="password"
                 name="password"
-                placeholder="Your Helix password"
+                placeholder="Ditt Helix-lösenord"
                 autocomplete="current-password"
                 required
               />
@@ -763,10 +774,12 @@ async def login_form(request: Request):
             <div class="actions">
               <button type="submit">
                 <span class="button-icon">⮕</span>
-                <span>Log in and open Grafana</span>
+                <span>Logga in och öppna Grafana</span>
               </button>
               <p class="footnote">
-                Powered by Python :)
+                Inloggningen används för att köra BMC Helix REST API-anrop
+                som <span>din användare</span> i Grafana (via impersonation)
+                och sätta rätt <span>Grafana-roll</span> baserat på Helix-grupper.
               </p>
             </div>
           </form>
@@ -829,24 +842,18 @@ async def logout():
 #  HELIX DATA-ENDPOINT
 # =========================
 
-@app.api_route("/helix-api/{form_name}", methods=["GET"])
+@app.api_route("/helix-api/{form_name}", methods=["GET", "POST"])
 async def helix_form_proxy(form_name: str, request: Request):
-    """
-    Generic, whitelisted proxy against Helix forms:
+    logger.debug(
+        f"helix_form_proxy: method={request.method}, "
+        f"path={request.url.path}, query={dict(request.query_params)}"
+    )
 
-    - form_name must exist in HELIX_ALLOWED_FORMS
-    - each call is executed as the current user via impersonation:
-        Authorization: AR-JWT <admin-token>
-        X-AR-Impersonated-User: base64(<username>)
-
-    - username is resolved via resolve_username(), meaning:
-        * X-Grafana-User (dataproxy)
-        * RSSO header (AUTH_MODE=rsso)
-        * or HLX_USER cookie (AUTH_MODE=local)
-    """
+    # ENDA sättet att få user: header (X-Grafana-User), RSSO eller cookie
     username = resolve_username(request)
+
     if not username:
-        logger.warning("helix_form_proxy: no logged in user")
+        logger.warning("helix_form_proxy: no logged in user (no header/cookie)")
         return JSONResponse({"error": "Not logged in to proxy"}, status_code=401)
 
     if form_name not in ALLOWED_FORMS:
@@ -856,27 +863,26 @@ async def helix_form_proxy(form_name: str, request: Request):
     helix_url = f"{HELIX_BASE_URL}/api/arsys/v1/entry/{form_name}"
     logger.debug(f"helix_form_proxy: user={username}, url={helix_url}")
 
-    # 1) Get cached or fresh admin token
     token = await get_admin_token()
     if not token:
         return JSONResponse({"error": "Failed to get admin token"}, status_code=502)
 
-    # X-AR-Impersonated-User must be base64 encoded according to BMC documentation
     impersonated_b64 = base64.b64encode(username.encode("utf-8")).decode("ascii")
 
+    # Skicka vidare original-queryn (minus ev. interna parametrar om du lägger till såna)
+    original_params = dict(request.query_params)
+
     async with httpx.AsyncClient(verify=False) as client:
-        # First attempt
         resp = await client.get(
             helix_url,
             headers={
                 "Authorization": f"AR-JWT {token}",
                 "X-AR-Impersonated-User": impersonated_b64,
             },
-            params=request.query_params,
+            params=original_params,
             timeout=15.0,
         )
 
-        # If token became invalid (401/403) → refresh admin login & retry once
         if resp.status_code in (401, 403):
             logger.warning("Admin token possibly expired, refreshing...")
             new_token = await get_admin_token(force_refresh=True)
@@ -891,7 +897,7 @@ async def helix_form_proxy(form_name: str, request: Request):
                     "Authorization": f"AR-JWT {new_token}",
                     "X-AR-Impersonated-User": impersonated_b64,
                 },
-                params=request.query_params,
+                params=original_params,
                 timeout=15.0,
             )
 
@@ -923,13 +929,44 @@ async def healthz():
 
 
 # =========================
+#  GRAFANA LIVE WEBSOCKET STUB
+# =========================
+
+@app.websocket("/api/live/ws")
+async def grafana_live_stub(websocket: WebSocket):
+    """
+    Stub endpoint for Grafana Live WebSocket.
+
+    - Accepts the WebSocket connection so Grafana does not see 403.
+    - Does not actively read or write any messages.
+    - Just keeps the connection open until the client disconnects.
+
+    This avoids noisy 403 logs from uvicorn when Grafana frontend
+    tries to connect to /api/live/ws.
+    """
+    await websocket.accept()
+    logger.debug("Grafana Live WebSocket connected (stub)")
+
+    try:
+        # Keep the connection open until the client disconnects.
+        # We don't need to read any data, just sleep in a loop.
+        while True:
+            await asyncio.sleep(60)
+    except WebSocketDisconnect:
+        logger.debug("Grafana Live WebSocket disconnected (stub)")
+    except Exception as e:
+        # In case of cancellation or other unexpected errors
+        logger.debug(f"Grafana Live WebSocket closed with error (stub): {e}")
+
+
+# =========================
 #  CATCH-ALL → GRAFANA
 # =========================
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def grafana_catch_all(path: str, request: Request):
     """
-    All traffic that does not match /login, /logout or /helix-api/*
+    All traffic that does not match /login, /logout, /helix-api/* or /api/live/ws
     is proxied to Grafana.
     """
     return await proxy_to_grafana(path, request)
