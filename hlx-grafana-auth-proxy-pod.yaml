@@ -70,7 +70,7 @@ data:
   #  400002 → Editor
   #  400003 → Admin
   ###########################################
-  HELIX_GROUP_ROLE_MAPPING: "400001:Viewer,400002:Editor,400003:Admin,410001:GrafanaRole01,410002:GrafanaRole02"
+  HELIX_GROUP_ROLE_MAPPING: "400001:Viewer,400002:Editor,400003:Admin"
 
 
   ###########################################
@@ -130,6 +130,10 @@ type: Opaque
 stringData:
   HELIX_ADMIN_USER: "Demo"
   HELIX_ADMIN_PASSWORD: "P@ssw0rd"
+  WEBHOOK_SHARED_SECRET: "super-hemligt-värde-här"
+  # Lägg till dessa två – de MÅSTE matcha Grafana-containerns GF_SECURITY_ADMIN_*
+  GRAFANA_ADMIN_USER: "admin"
+  GRAFANA_ADMIN_PASSWORD: "changeme"
 ---
 #############################################
 # PersistentVolumeClaim: Grafana Storage
@@ -190,7 +194,7 @@ spec:
         - name: GF_AUTH_PROXY_HEADER_PROPERTY
           value: "username"
         - name: GF_AUTH_PROXY_AUTO_SIGN_UP
-          value: "true"
+          value: "false"
 
         # Map Role attribute from HTTP header X-WEBAUTH-ROLE
         - name: GF_AUTH_PROXY_HEADERS

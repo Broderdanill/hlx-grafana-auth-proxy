@@ -33,5 +33,13 @@ ENV GRAFANA_INTERNAL_URL=http://127.0.0.1:3000
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
+CMD ["uvicorn", "app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8080", \
+     "--workers", "2", \
+     "--proxy-headers", \
+     "--log-level", "debug", \
+     "--access-log"]
+
+
 

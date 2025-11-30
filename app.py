@@ -2,9 +2,11 @@ import os
 import base64
 import logging
 import asyncio
-from typing import Optional, Dict
+import json
+from typing import Optional, Dict, List, Literal
+from pydantic import BaseModel, Field
 
-from fastapi import FastAPI, Request, Response, Form, WebSocket
+from fastapi import HTTPException, Depends, FastAPI, Request, Response, Form, WebSocket
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
 import httpx
@@ -30,6 +32,11 @@ logger.info(f"Starting hlx-grafana-auth-proxy with LOG_LEVEL={LOG_LEVEL}")
 # Internal URL where Grafana is reachable (inside the POD / network namespace)
 GRAFANA_INTERNAL_URL = os.getenv("GRAFANA_INTERNAL_URL", "http://127.0.0.1:3000")
 
+# API Token used to sync users and group from Helix
+GRAFANA_API_TOKEN = os.getenv("GRAFANA_API_TOKEN")
+GRAFANA_ADMIN_USER = os.getenv("GRAFANA_ADMIN_USER", "admin")
+GRAFANA_ADMIN_PASSWORD = os.getenv("GRAFANA_ADMIN_PASSWORD", "changeme")
+
 # Helix REST base URL
 HELIX_BASE_URL = os.getenv("HELIX_BASE_URL", "https://helix.example.com")
 
@@ -39,6 +46,9 @@ HELIX_JWT_LOGIN_URL = os.getenv(
     "HELIX_JWT_LOGIN_URL",
     f"{HELIX_BASE_URL}/api/jwt/login",
 )
+
+# Get Webhook Secret
+WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET")
 
 # Service account (admin / technical user) used for impersonation against Helix
 HELIX_ADMIN_USER = os.getenv("HELIX_ADMIN_USER", "svc_helix_reports")
@@ -93,6 +103,42 @@ def parse_form_whitelist(value: str):
     return forms
 
 
+def verify_webhook_data(data: dict):
+    """
+    Verifiera inkommande webhook genom att läsa shared_secret från JSON-dict.
+
+    Förväntat format (i Helix Webhook Custom JSON-fältet):
+
+      { "shared_secret": "super-hemligt-värde-här" }
+
+    eller (om Helix lägger det under custom_json):
+
+      {
+        "custom_json": {
+          "shared_secret": "super-hemligt-värde-här"
+        },
+        ...
+      }
+    """
+    if not WEBHOOK_SHARED_SECRET:
+        logger.warning("WEBHOOK_SHARED_SECRET is not configured – allowing all webhooks")
+        return
+
+    if not isinstance(data, dict):
+        logger.warning("Webhook body is not a JSON object")
+        raise HTTPException(status_code=400, detail="Invalid webhook body type")
+
+    shared_secret = data.get("shared_secret")
+
+    # fallback: custom_json.shared_secret
+    if not shared_secret and isinstance(data.get("custom_json"), dict):
+        shared_secret = data["custom_json"].get("shared_secret")
+
+    if not shared_secret or shared_secret != WEBHOOK_SHARED_SECRET:
+        logger.warning("Webhook call with invalid or missing shared_secret")
+        raise HTTPException(status_code=401, detail="Invalid webhook shared secret")
+
+
 def parse_group_role_mapping(value: str) -> Dict[str, str]:
     """
     "400001:Viewer,400002:Editor,400003:Admin"
@@ -129,6 +175,11 @@ GROUP_TEAM_MAPPING: Dict[str, str] = {
     for gid, group_name in ALL_GROUP_MAPPING.items()
     if group_name not in GRAFANA_ORG_ROLES
 }
+
+# Dynamisk karta: Helix Group ID -> Grafana team-namn
+# Uppdateras i /webhook/grafana/team utifrån "Group Name" (t.ex. ...-410001)
+TEAM_ID_MAP: Dict[str, str] = {}
+
 
 logger.info(f"Allowed Helix forms: {ALLOWED_FORMS}")
 logger.info(f"AUTH_MODE: {AUTH_MODE}, RSSO_HEADER_NAME: {RSSO_HEADER_NAME}")
@@ -286,6 +337,45 @@ async def get_admin_token(force_refresh: bool = False) -> Optional[str]:
     return _ADMIN_TOKEN
 
 
+async def grafana_request(method: str, path: str,
+                          json: dict | None = None,
+                          params: dict | None = None):
+    """
+    Wrapper runt Grafanas HTTP-API.
+
+    - Om GRAFANA_API_TOKEN finns -> använd Bearer-token
+    - Annars -> använd Basic Auth med GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD
+    """
+    url = f"{GRAFANA_INTERNAL_URL}{path}"
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+
+    auth = None
+    if GRAFANA_API_TOKEN:
+        headers["Authorization"] = f"Bearer {GRAFANA_API_TOKEN}"
+    else:
+        # Fallback: Basic Auth mot Grafana admin-kontot
+        if not GRAFANA_ADMIN_USER or not GRAFANA_ADMIN_PASSWORD:
+            raise RuntimeError("No Grafana API token or admin credentials configured")
+        auth = (GRAFANA_ADMIN_USER, GRAFANA_ADMIN_PASSWORD)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.request(
+            method,
+            url,
+            headers=headers,
+            json=json,
+            params=params,
+            timeout=10.0,
+            auth=auth,
+        )
+
+    logger.debug(f"Grafana API {method} {path} -> {resp.status_code}")
+    return resp
+
+
 async def fetch_user_groups(username: str) -> Optional[str]:
     """
     Fetch the 'Group List' (or configured group field) for a given user
@@ -400,20 +490,28 @@ def pick_role_from_groups(group_list: str) -> str:
 
 def pick_teams_from_groups(group_list: str) -> list[str]:
     """
-    Extract Grafana "team/group tags" from a semicolon-separated Helix group string.
+    Extract Grafana team-namn från semikolonseparerad Helix-gruppsträng.
 
-    Example:
+    Vi tittar både i:
+      - TEAM_ID_MAP (dynamisk: Helix Group ID -> Grafana-teamnamn)
+      - GROUP_TEAM_MAPPING (statisk via env, endast fallback)
+
+    Exempel:
+      TEAM_ID_MAP = {"410001": "GRP_Grafana_FolderPermission01"}
       GROUP_TEAM_MAPPING = {"410001": "GrafanaRole01"}
       group_list = "1;400003;410001;12321;"
-      -> ["GrafanaRole01"]
+      -> ["GRP_Grafana_FolderPermission01"]  (TEAM_ID_MAP vinner)
     """
     teams = set()
     parts = [p.strip() for p in group_list.split(";") if p.strip()]
     for gid in parts:
-        team = GROUP_TEAM_MAPPING.get(gid)
+        # OBS: ändrad ordning här
+        team = TEAM_ID_MAP.get(gid) or GROUP_TEAM_MAPPING.get(gid)
         if team:
             teams.add(team)
     return sorted(teams)
+
+
 
 
 async def get_grafana_groups_for_user(username: str) -> str:
@@ -1000,6 +1098,560 @@ async def helix_form_proxy(form_name: str, request: Request):
         )
 
     return JSONResponse(resp.json())
+
+class UserSyncPayload(BaseModel):
+    action: Literal["create", "update", "delete"]
+
+    # Helix-fält, men med Python-vänliga namn + alias
+    login_name: str = Field(alias="Login Name")
+    full_name: Optional[str] = Field(None, alias="Full Name")
+    email_address: Optional[str] = Field(None, alias="Email Address")
+    group_list: Optional[str] = Field(None, alias="Group List")
+
+
+class TeamSyncPayload(BaseModel):
+    action: Literal["create", "update", "delete"]
+
+    # Helix-fältnamn via alias
+    group_name: str = Field(alias="Group Name")
+    # Kan komma som int eller str → tillåt båda
+    group_id: Optional[str | int] = Field(None, alias="Group ID")
+
+    # email kan komma från Helix (antingen i entry_details eller top-level)
+    email: Optional[str] = None
+
+
+
+@app.post("/webhook/grafana/user")
+async def sync_user(request: Request):
+    """
+    Webhook som Helix kan anropa för att skapa/uppdatera/ta bort användare i Grafana.
+
+    Payload från Helix ser ut ungefär så här:
+    {
+      "record_id": "...",
+      "webhook_id": "...",
+      "entry_details": {
+        "Login Name": "Demo",
+        "Full Name": "Demo User",
+        "Email Address": "demo@example.com",
+        "Group List": "400001;410001;420001;"
+      },
+      "action": "update",
+      "shared_secret": "super-hemligt-värde-här",
+      "entry_event": "Update",
+      "form_name": "User",
+      "entry_id": "..."
+    }
+    """
+    raw_body = await request.body()
+    logger.debug(
+        "Webhook /webhook/grafana/user – incoming request\n"
+        f"  method: {request.method}\n"
+        f"  url   : {request.url}\n"
+        f"  headers: {dict(request.headers)}\n"
+        f"  body  : {raw_body.decode('utf-8', 'ignore')}"
+    )
+
+    # 1) JSON-dekod
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in /webhook/grafana/user: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # 2) Verifiera shared_secret i toppnivån (eller ev. custom_json)
+    verify_webhook_data(data)
+
+    # 3) Plocka ut entry_details (själva Helix-recordet)
+    entry_details = data.get("entry_details") or {}
+    if not isinstance(entry_details, dict):
+        logger.warning("entry_details saknas eller är inte ett objekt")
+        raise HTTPException(status_code=400, detail="Missing or invalid entry_details")
+
+    action = data.get("action")
+    if not action:
+        logger.warning("Webhook saknar 'action'-fält")
+        raise HTTPException(status_code=400, detail="Missing action in webhook payload")
+
+    # 4) Bygg dict: action + alla fält i entry_details
+    payload_data = {"action": action}
+    payload_data.update(entry_details)
+
+    # 5) Låt Pydantic göra jobbet med aliasen ("Login Name" etc.)
+    try:
+        payload = UserSyncPayload.model_validate(payload_data)
+    except Exception as e:
+        logger.error(f"Validation error in UserSyncPayload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid user payload")
+
+    # ====== härifrån är din tidigare logik som innan ======
+
+    login = payload.login_name
+    name = payload.full_name or payload.login_name
+    email = payload.email_address or f"{login}@local"
+    group_list = payload.group_list or ""
+
+    # Cacha Group List för användaren (för senare resync när nya teams dyker upp)
+    _GROUP_LIST_CACHE[login] = group_list
+
+
+    # 1) Slå upp användaren på login
+    lookup = await grafana_request(
+        "GET", "/api/users/lookup", params={"loginOrEmail": login}
+    )
+
+    existing_user = None
+    if lookup.status_code == 200:
+        existing_user = lookup.json()  # innehåller bl.a. "id"
+
+    # DELETE
+    if payload.action == "delete":
+        if not existing_user:
+            return {"status": "ok", "info": "user not found, nothing to delete"}
+
+        uid = existing_user["id"]
+        resp = await grafana_request("DELETE", f"/api/admin/users/{uid}")
+        return {"status": "ok", "grafana_status": resp.status_code}
+
+    # CREATE (om user saknas och action=create eller update)
+    if payload.action in ("create", "update") and not existing_user:
+        body = {
+            "name": name,
+            "login": login,
+            "email": email,
+            "password": "changeme-not-used",
+        }
+        resp = await grafana_request("POST", "/api/admin/users", json=body)
+        if resp.status_code not in (200, 201):
+            return JSONResponse(
+                {"error": "failed to create user in grafana", "body": resp.text},
+                status_code=500,
+            )
+        existing_user = resp.json()
+
+    # Om vi fortfarande inte har en user här är det fel (t.ex. action=update på icke-befintlig)
+    if not existing_user:
+        return JSONResponse(
+            {"error": "user does not exist in grafana", "login": login},
+            status_code=404,
+        )
+
+    uid = existing_user["id"]
+
+    # 2) Uppdatera basic info
+    resp_update = None
+    if payload.action in ("create", "update"):
+        body = {
+            "name": name or existing_user.get("name") or login,
+            "login": login,
+            "email": email or existing_user.get("email") or f"{login}@local",
+        }
+        resp_update = await grafana_request(
+            "PUT", f"/api/admin/users/{uid}", json=body
+        )
+
+    # 3) Beräkna org-roll + teams från Group List
+    role = pick_role_from_groups(group_list) if group_list else HELIX_DEFAULT_GRAFANA_ROLE
+    teams = pick_teams_from_groups(group_list) if group_list else []
+
+    # 3a) Sätt org-roll
+    resp_role = None
+    if role:
+        body_role = {"role": role}
+        resp_role = await grafana_request(
+            "PATCH", f"/api/org/users/{uid}", json=body_role
+        )
+
+    # 3b) Synka team-medlemskap baserat på teams-listan
+    team_sync_result = None
+    if teams and payload.action in ("create", "update"):
+        desired_names = set(teams)
+
+        # Slå upp alla önskade teams
+        desired_ids: set[int] = set()
+        missing_teams: list[str] = []
+
+        for name_ in desired_names:
+            team = await grafana_find_team_by_name(name_)
+            if not team:
+                logger.warning(f"Team '{name_}' finns inte i Grafana (hoppar över).")
+                missing_teams.append(name_)
+                continue
+            desired_ids.add(team["id"])
+
+        # Hämta nuvarande medlemskap
+        current = await grafana_get_user_teams(uid)
+        current_ids = {t["teamId"] for t in current}
+
+        to_add = desired_ids - current_ids
+        to_remove = current_ids - desired_ids
+
+        add_results = []
+        for tid in to_add:
+            body = {"userId": uid, "role": "Member"}
+            r = await grafana_request("POST", f"/api/teams/{tid}/members", json=body)
+            add_results.append({"team_id": tid, "status": r.status_code})
+
+        remove_results = []
+        for tid in to_remove:
+            r = await grafana_request("DELETE", f"/api/teams/{tid}/members/{uid}")
+            remove_results.append({"team_id": tid, "status": r.status_code})
+
+        team_sync_result = {
+            "added": add_results,
+            "removed": remove_results,
+            "missing_teams": missing_teams,
+        }
+
+    return {
+        "status": "ok",
+        "user_id": uid,
+        "role": role,
+        "update_status": resp_update.status_code if resp_update else None,
+        "role_status": resp_role.status_code if resp_role else None,
+        "teams": team_sync_result,
+    }
+
+
+async def grafana_find_team_by_name(name: str):
+    resp = await grafana_request("GET", "/api/teams/search", params={"name": name})
+    if resp.status_code != 200:
+        logger.error(f"Failed to search team '{name}': {resp.text[:200]}")
+        return None
+    data = resp.json()
+    teams = data.get("teams") or []
+    return teams[0] if teams else None
+
+async def grafana_get_user_teams(user_id: int):
+    resp = await grafana_request("GET", f"/api/teams/user/{user_id}")
+    if resp.status_code != 200:
+        logger.error(f"Failed to get teams for user {user_id}: {resp.text[:200]}")
+        return []
+    return resp.json()  # lista med { teamId, teamName, ... }
+
+
+async def sync_user_teams_for_login(login: str, group_list: str):
+    """
+    Synka Grafana-team-medlemskap för en användare baserat på Helix Group List.
+
+    Används:
+      - indirekt från team-webhooken när ett nytt team skapas för ett Group ID
+        som vissa användare redan har i sin group_list.
+    """
+    teams = pick_teams_from_groups(group_list)
+    if not teams:
+        logger.info(f"sync_user_teams_for_login: user={login} har inga teams att synka")
+        return
+
+    # 1) Slå upp Grafana-user
+    lookup = await grafana_request(
+        "GET", "/api/users/lookup", params={"loginOrEmail": login}
+    )
+    if lookup.status_code != 200:
+        logger.warning(
+            f"sync_user_teams_for_login: kunde inte slå upp user '{login}' i Grafana, "
+            f"status={lookup.status_code}, body={lookup.text[:200]}"
+        )
+        return
+
+    user = lookup.json()
+    uid = user.get("id")
+    if uid is None:
+        logger.warning(
+            f"sync_user_teams_for_login: lookup-result saknar 'id' för login={login}"
+        )
+        return
+
+    desired_names = set(teams)
+
+    # 2) Slå upp alla önskade teams i Grafana
+    desired_ids: set[int] = set()
+    missing_teams: list[str] = []
+
+    for name in desired_names:
+        team = await grafana_find_team_by_name(name)
+        if not team:
+            logger.warning(
+                f"sync_user_teams_for_login: Team '{name}' finns inte i Grafana (hoppar över)."
+            )
+            missing_teams.append(name)
+            continue
+        desired_ids.add(team["id"])
+
+    if not desired_ids:
+        logger.info(
+            f"sync_user_teams_for_login: user={login} har inga befintliga Grafana-teams att synka"
+        )
+        return
+
+    # 3) Hämta nuvarande medlemskap
+    current = await grafana_get_user_teams(uid)
+    current_ids = {t["teamId"] for t in current}
+
+    to_add = desired_ids - current_ids
+    to_remove = current_ids - desired_ids
+
+    add_results = []
+    for tid in to_add:
+        body = {"userId": uid, "role": "Member"}
+        r = await grafana_request("POST", f"/api/teams/{tid}/members", json=body)
+        add_results.append({"team_id": tid, "status": r.status_code})
+
+    remove_results = []
+    for tid in to_remove:
+        r = await grafana_request("DELETE", f"/api/teams/{tid}/members/{uid}")
+        remove_results.append({"team_id": tid, "status": r.status_code})
+
+    logger.info(
+        "sync_user_teams_for_login: färdig sync "
+        f"user={login}, added={add_results}, removed={remove_results}, "
+        f"missing={missing_teams}"
+    )
+
+async def resync_users_for_group_id(group_id: str):
+    """
+    När ett nytt team skapas/uppdateras för ett visst Helix Group ID
+    (t.ex. 410002) vill vi synka alla användare som har den gruppen i sin
+    Group List – även om podden precis startat och vår cache är tom.
+
+    Vi frågar Helix User-formen efter alla users vars Group List innehåller
+    ;<group_id>; och synkar sedan deras team-medlemskap i Grafana.
+    """
+    token = await get_admin_token()
+    if not token:
+        logger.error("resync_users_for_group_id: no admin token available")
+        return
+
+    # Bygg Helix-qualification:
+    #   'Group List' LIKE "%;410002;%"
+    pattern = f"%;{group_id};%"
+    qualification = f"'{HELIX_USER_GROUP_FIELD}' LIKE \"{pattern}\""
+
+    params = {
+        "q": qualification,
+        "fields": f"values({HELIX_USER_LOGIN_FIELD},{HELIX_USER_GROUP_FIELD})",
+    }
+
+    url = f"{HELIX_BASE_URL}/api/arsys/v1/entry/{HELIX_USER_FORM}"
+
+    logger.info(
+        f"resync_users_for_group_id: hämtar users från Helix med group_id={group_id}, "
+        f"q={qualification}"
+    )
+
+    async with httpx.AsyncClient(verify=False) as client:
+        try:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"AR-JWT {token}"},
+                params=params,
+                timeout=20.0,
+            )
+        except httpx.RequestError as e:
+            logger.error(f"resync_users_for_group_id: error calling Helix: {e}")
+            return
+
+    if resp.status_code != 200:
+        logger.error(
+            f"resync_users_for_group_id: Helix error {resp.status_code}, body={resp.text[:500]}"
+        )
+        return
+
+    data = resp.json()
+    entries = data.get("entries", [])
+
+    if not entries:
+        logger.info(
+            f"resync_users_for_group_id: inga users i Helix med group_id={group_id}"
+        )
+        return
+
+    affected_users: list[str] = []
+
+    for entry in entries:
+        values = entry.get("values", {})
+        login = values.get(HELIX_USER_LOGIN_FIELD)
+        group_list = values.get(HELIX_USER_GROUP_FIELD)
+
+        if not login or not group_list:
+            continue
+
+        if not isinstance(group_list, str):
+            group_list = str(group_list)
+
+        affected_users.append(login)
+
+        # Uppdatera cache så den är “up to date”
+        _GROUP_LIST_CACHE[login] = group_list
+
+        try:
+            await sync_user_teams_for_login(login, group_list)
+        except Exception as e:
+            logger.error(
+                f"resync_users_for_group_id: fel vid sync för user={login}: {e}"
+            )
+
+    logger.info(
+        f"resync_users_for_group_id: färdig resync för group_id={group_id}, "
+        f"users={affected_users}"
+    )
+
+
+
+@app.post("/webhook/grafana/team")
+async def sync_team(request: Request):
+    """
+    Webhook för att skapa/uppdatera/ta bort Grafana-teams (grupper).
+
+    Typisk payload från Helix:
+    {
+      "record_id": "...",
+      "webhook_id": "...",
+      "entry_details": {
+        "Group Name": "GRP_Grafana_FolderPermission01",
+        "Group ID": 410001
+      },
+      "action": "update",
+      "shared_secret": "super-hemligt-värde-här",
+      "entry_event": "Update",
+      "form_name": "Group",
+      "entry_id": "...",
+      "email": "noreply@me.com"
+    }
+    """
+    raw_body = await request.body()
+    logger.debug(
+        "Webhook /webhook/grafana/team – incoming request\n"
+        f"  method: {request.method}\n"
+        f"  url   : {request.url}\n"
+        f"  headers: {dict(request.headers)}\n"
+        f"  body  : {raw_body.decode('utf-8', 'ignore')}"
+    )
+
+    try:
+        data = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in /webhook/grafana/team: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    # Verifiera shared_secret på toppnivån
+    verify_webhook_data(data)
+
+    entry_details = data.get("entry_details") or {}
+    if not isinstance(entry_details, dict):
+        logger.warning("entry_details saknas eller är inte ett objekt (team)")
+        raise HTTPException(status_code=400, detail="Missing or invalid entry_details")
+
+    action = data.get("action")
+    if not action:
+        logger.warning("Team-webhook saknar 'action'-fält")
+        raise HTTPException(status_code=400, detail="Missing action in webhook payload")
+
+    # Bygg payload_data: action + entry_details (+ ev. email från toppnivån)
+    payload_data = {"action": action}
+    payload_data.update(entry_details)
+
+    # Top-level email från Helix (om den finns)
+    if "email" in data and "email" not in payload_data:
+        payload_data["email"] = data["email"]
+
+    try:
+        payload = TeamSyncPayload.model_validate(payload_data)
+    except Exception as e:
+        logger.error(f"Validation error in TeamSyncPayload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid team payload")
+
+    name = payload.group_name
+    email = payload.email or ""
+
+    # Normalisera group_id till str (Helix skickar ofta 410001 som int)
+    raw_group_id = payload.group_id
+    group_id = str(raw_group_id).strip() if raw_group_id not in (None, "") else None
+
+    # Slå upp teamet i Grafana
+    existing = await grafana_find_team_by_name(name)
+
+    # DELETE
+    if payload.action == "delete":
+        if not existing:
+            # Rensa ev. cache om vi har ett id
+            if group_id and group_id in TEAM_ID_MAP:
+                TEAM_ID_MAP.pop(group_id, None)
+            return {"status": "ok", "info": "team not found, nothing to delete"}
+
+        tid = existing["id"]
+        resp = await grafana_request("DELETE", f"/api/teams/{tid}")
+
+        if group_id and group_id in TEAM_ID_MAP:
+            TEAM_ID_MAP.pop(group_id, None)
+
+        return {"status": "ok", "grafana_status": resp.status_code}
+
+    # CREATE (om team saknas och action=create eller update)
+    if payload.action in ("create", "update") and not existing:
+        body = {
+            "name": name,
+            "email": email,
+        }
+        resp = await grafana_request("POST", "/api/teams", json=body)
+        logger.debug(
+            f"Grafana API POST /api/teams -> {resp.status_code}, body={resp.text[:200]}"
+        )
+        if resp.status_code not in (200, 201):
+            return JSONResponse(
+                {"error": "failed to create team in grafana", "body": resp.text},
+                status_code=500,
+            )
+
+        # Viktigt: POST-svaret innehåller bara message + teamId, så
+        # vi hämtar teamet igen för att få full info inkl. 'id'.
+        existing = await grafana_find_team_by_name(name)
+        if not existing:
+            logger.error(
+                "Team created in Grafana men kunde inte hittas via /api/teams/search"
+            )
+            return JSONResponse(
+                {
+                    "error": "team created but not found in grafana",
+                    "name": name,
+                    "grafana_response": resp.text[:200],
+                },
+                status_code=500,
+            )
+
+    if not existing:
+        return JSONResponse(
+            {"error": "team does not exist in grafana", "name": name},
+            status_code=404,
+        )
+
+    # UPDATE (ändra mail/namn – i ditt fall framför allt mail)
+    tid = existing["id"]
+    if payload.action in ("create", "update"):
+        body = {
+            "name": name,
+            "email": email or existing.get("email") or "",
+        }
+        resp_upd = await grafana_request("PUT", f"/api/teams/{tid}", json=body)
+
+        # Uppdatera vår karta Helix Group ID -> Grafana-teamnamn
+        if group_id:
+            TEAM_ID_MAP[group_id] = name
+            logger.info(f"TEAM_ID_MAP[{group_id}] = {name}")
+
+            # Nyckeln: resynca alla cachade användare som har denna grupp
+            await resync_users_for_group_id(group_id)
+
+        return {
+            "status": "ok",
+            "team_id": tid,
+            "update_status": resp_upd.status_code,
+            "group_id": group_id,
+        }
+
+
+    return {"status": "ok"}
 
 
 # =========================
