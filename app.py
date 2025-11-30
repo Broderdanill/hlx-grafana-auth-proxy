@@ -850,6 +850,13 @@ async def helix_form_proxy(form_name: str, request: Request):
 
     return JSONResponse(resp.json())
 
+# =========================
+#  HEALTH CHECK
+# =========================
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
 
 # =========================
 #  CATCH-ALL → GRAFANA
@@ -862,3 +869,4 @@ async def grafana_catch_all(path: str, request: Request):
     hamnar här och proxas vidare till Grafana.
     """
     return await proxy_to_grafana(path, request)
+
