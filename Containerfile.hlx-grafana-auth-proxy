@@ -1,29 +1,32 @@
 # Containerfile.hlx-grafana-auth-proxy
 FROM python:3.12-slim
 
-# Lite bra Python defaults
+# Python defaults
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Skapa en icke-root-användare
-# -r = systemkonto, ingen home / shell-krusiduller
+# Log level
+ENV LOG_LEVEL=INFO
+
+# Create non-root user
+# -r = system account, no home
 RUN useradd -r -u 1000 appuser
 
 WORKDIR /app
 
-# Kopiera requirements först (bättre caching i Docker/Podman)
+# Copy requirements
 COPY requirements.txt .
 
-# Installera Python-dependencies
+# Install Python-dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kopiera applikationskoden
+# Copy application code
 COPY app.py .
 
-# Sätt rätt ägare på app-mappen så att appuser kan läsa/köra
+# set permissions to folder/files
 RUN chown -R appuser:appuser /app
 
-# BYT TILL ICKE-ROOT-ANVÄNDARE HÄR
+# Switch to non root user
 USER appuser
 
 ENV GRAFANA_INTERNAL_URL=http://127.0.0.1:3000

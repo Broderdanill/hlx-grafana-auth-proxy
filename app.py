@@ -1,5 +1,6 @@
 import os
 import base64
+import logging
 from typing import Optional, Dict
 
 from fastapi import FastAPI, Request, Response, Form
@@ -7,66 +8,80 @@ from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 import httpx
 
 # =========================
-#  KONFIGURATION / ENV
+#  LOGGING CONFIGURATION
 # =========================
 
-# Intern URL där Grafana lyssnar (inne i POD:en / network namespace)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+)
+
+logger = logging.getLogger("hlx-grafana-auth-proxy")
+logger.info(f"Starting hlx-grafana-auth-proxy with LOG_LEVEL={LOG_LEVEL}")
+
+# =========================
+#  CONFIG / ENV
+# =========================
+
+# Internal URL where Grafana is reachable (inside the POD / network namespace)
 GRAFANA_INTERNAL_URL = os.getenv("GRAFANA_INTERNAL_URL", "http://127.0.0.1:3000")
 
-# Helix REST-bas
+# Helix REST base URL
 HELIX_BASE_URL = os.getenv("HELIX_BASE_URL", "https://helix.example.com")
 
-# JWT-login endpoint för både användare och servicekonto
-# I de flesta fall: https://<helix>/api/jwt/login
+# JWT login endpoint for both user and service account
+# In most cases: https://<helix>/api/jwt/login
 HELIX_JWT_LOGIN_URL = os.getenv(
     "HELIX_JWT_LOGIN_URL",
     f"{HELIX_BASE_URL}/api/jwt/login",
 )
 
-# Servicekonto (admin / technical user) som används för impersonation mot Helix
+# Service account (admin / technical user) used for impersonation against Helix
 HELIX_ADMIN_USER = os.getenv("HELIX_ADMIN_USER", "svc_helix_reports")
 HELIX_ADMIN_PASSWORD = os.getenv("HELIX_ADMIN_PASSWORD", "changeme")
 
-# Cookie-namn där vi lagrar användarnamnet vid "local" login
+# Cookie name used to store the username for local login mode
 HELIX_USER_COOKIE = "HLX_USER"
 
-# AUTH_MODE styr hur autentisering görs:
-#  - "local" (default): egen login-sida mot Helix JWT-login (username + password)
-#  - "rsso": användare autentiseras externt via RSSO / reverse proxy, t.ex. header X-RSSO-USER
+# AUTH_MODE controls how authentication is performed:
+#  - "local" (default): own login page against Helix JWT-login (username + password)
+#  - "rsso": user is authenticated externally via RSSO / reverse proxy header, e.g. X-RSSO-USER
 AUTH_MODE = os.getenv("AUTH_MODE", "local").lower()
 
-# RSSO_HEADER_NAME används bara om AUTH_MODE="rsso"
-# Reverse proxy framför denna app ska då sätta t.ex. X-RSSO-USER: <loginName>
+# RSSO_HEADER_NAME is only used when AUTH_MODE="rsso"
+# Reverse proxy in front of this app should set e.g. X-RSSO-USER: <loginName>
 RSSO_HEADER_NAME = os.getenv("RSSO_HEADER_NAME", "X-RSSO-USER")
 
-# Whitelist av Helix-formulär (kommaseparerad lista)
-# Exempel: "User,Group,HPD:IncidentInterface"
+# Whitelist of Helix forms (comma-separated)
+# Example: "User,Group,HPD:IncidentInterface"
 RAW_ALLOWED_FORMS = os.getenv("HELIX_ALLOWED_FORMS", "")
 
-# Formulär + fält som används för att läsa användarens grupper
-# Default-formulär: "User"
+# Form + fields used to read the user's groups
+# Default form: "User"
 HELIX_USER_FORM = os.getenv("HELIX_USER_FORM", "User")
-# Fältet för login-namnet i User-formuläret (som Helix använder)
+# Field containing the login name in the User form (Helix login name)
 HELIX_USER_LOGIN_FIELD = os.getenv("HELIX_USER_LOGIN_FIELD", "Login Name")
-# Fältet som innehåller grupp-strängen, t.ex. "1;400003;12321;"
+# Field containing the group string, e.g. "1;400003;12321;"
 HELIX_USER_GROUP_FIELD = os.getenv("HELIX_USER_GROUP_FIELD", "Group List")
 
-# Mappning från Helix-grupp-ID → Grafana-roll
-# Default-exempel: 400001=Viewer, 400002=Editor, 400003=Admin
+# Mapping from Helix group ID → Grafana role
+# Default example: 400001=Viewer, 400002=Editor, 400003=Admin
 # Format: "400001:Viewer,400002:Editor,400003:Admin"
 RAW_GROUP_ROLE_MAPPING = os.getenv(
     "HELIX_GROUP_ROLE_MAPPING",
     "400001:Viewer,400002:Editor,400003:Admin",
 )
 
-# Defaultroll om ingen matchande grupp hittas eller om Helix-queryn misslyckas
+# Default Grafana role if no matching group is found or Helix query fails
 HELIX_DEFAULT_GRAFANA_ROLE = os.getenv("HELIX_DEFAULT_GRAFANA_ROLE", "Viewer")
 
 
 def parse_form_whitelist(value: str):
     """
-    'User,Group,HPD:IncidentInterface'
-    -> ['User', 'Group', 'HPD:IncidentInterface']
+    "User,Group,HPD:IncidentInterface"
+    -> ["User", "Group", "HPD:IncidentInterface"]
     """
     forms = []
     for part in value.split(","):
@@ -99,23 +114,24 @@ def parse_group_role_mapping(value: str) -> Dict[str, str]:
 ALLOWED_FORMS = parse_form_whitelist(RAW_ALLOWED_FORMS)
 GROUP_ROLE_MAPPING = parse_group_role_mapping(RAW_GROUP_ROLE_MAPPING)
 
-print("Allowed Helix forms:", ALLOWED_FORMS)
-print("AUTH_MODE:", AUTH_MODE, "RSSO_HEADER_NAME:", RSSO_HEADER_NAME)
-print("GROUP_ROLE_MAPPING:", GROUP_ROLE_MAPPING)
-print("HELIX_USER_FORM:", HELIX_USER_FORM)
-print("HELIX_USER_LOGIN_FIELD:", HELIX_USER_LOGIN_FIELD)
-print("HELIX_USER_GROUP_FIELD:", HELIX_USER_GROUP_FIELD)
-print("HELIX_DEFAULT_GRAFANA_ROLE:", HELIX_DEFAULT_GRAFANA_ROLE)
+logger.info(f"LOG_LEVEL: {LOG_LEVEL}")
+logger.info(f"Allowed Helix forms: {ALLOWED_FORMS}")
+logger.info(f"AUTH_MODE: {AUTH_MODE}, RSSO_HEADER_NAME: {RSSO_HEADER_NAME}")
+logger.debug(f"GROUP_ROLE_MAPPING: {GROUP_ROLE_MAPPING}")
+logger.debug(f"HELIX_USER_FORM: {HELIX_USER_FORM}")
+logger.debug(f"HELIX_USER_LOGIN_FIELD: {HELIX_USER_LOGIN_FIELD}")
+logger.debug(f"HELIX_USER_GROUP_FIELD: {HELIX_USER_GROUP_FIELD}")
+logger.info(f"HELIX_DEFAULT_GRAFANA_ROLE: {HELIX_DEFAULT_GRAFANA_ROLE}")
 
 app = FastAPI()
 
-# Cache för servicekontots admin-token (AR-JWT)
+# Cache for service account admin token (AR-JWT)
 _ADMIN_TOKEN: Optional[str] = None
 
-# Cache för användarens grafana-roll (username -> role)
+# Cache for Grafana role per user (username -> role)
 _ROLE_CACHE: Dict[str, str] = {}
 
-# Enkel prioritering för roller om en användare har flera grupper
+# Simple priority for roles if user has multiple groups
 ROLE_PRIORITY = {
     "Viewer": 1,
     "Editor": 2,
@@ -124,56 +140,59 @@ ROLE_PRIORITY = {
 
 
 # =========================
-#  HJÄLPFUNKTIONER
+#  HELPER FUNCTIONS
 # =========================
 
 def resolve_username(request: Request) -> Optional[str]:
     """
-    Hitta aktuell användare beroende på var anropet kommer ifrån och AUTH_MODE.
+    Resolve the current user based on where the request comes from and AUTH_MODE.
 
-    Prioritet:
+    Priority:
 
     1) X-Grafana-User
-       - När Grafana dataproxy anropar denna app (t.ex. /helix-api/User) och
-         GF_DATAPROXY_SEND_USER_HEADER=true, skickas grafana-username i denna header.
-       - Detta är vår bästa källa för "vem kör queryn?" i backend-läge.
+       - When Grafana dataproxy calls this app (e.g. /helix-api/User) and
+         GF_DATAPROXY_SEND_USER_HEADER=true, Grafana username is sent in this header.
+       - This is the best source for "who executes the query?" in backend mode.
 
-    2) RSSO-header (om AUTH_MODE="rsso")
-       - Reverse proxy eller RSSO-agent framför denna app sätter t.ex. X-RSSO-USER: <loginName>
+    2) RSSO header (if AUTH_MODE="rsso")
+       - Reverse proxy or RSSO in front of this app sets e.g. X-RSSO-USER: <loginName>
 
-    3) HLX_USER-cookie
-       - Sätts endast vid "local" login (manuell inloggning via /login).
+    3) HLX_USER cookie
+       - Only set in "local" mode (manual login via /login).
     """
-    # 1. Backend-anrop från Grafana dataproxy
+    # 1. Backend request from Grafana dataproxy
     hdr = request.headers.get("X-Grafana-User")
     if hdr:
         return hdr
 
-    # 2. RSSO-läge: lita på headern från reverse proxy
+    # 2. RSSO mode: trust header from reverse proxy
     if AUTH_MODE == "rsso":
         hdr = request.headers.get(RSSO_HEADER_NAME)
         if hdr:
             return hdr
 
-    # 3. Fallback: vår egen cookie (framförallt i local-läge)
+    # 3. Fallback: our own cookie (mainly in local mode)
     return request.cookies.get(HELIX_USER_COOKIE)
 
 
 def get_cookie_user(request: Request) -> Optional[str]:
     """
-    Används endast vid browser-login (/login) i local-läge.
+    Return user from HLX_USER cookie.
+    Used only for browser login (/login) in local mode.
     """
     return request.cookies.get(HELIX_USER_COOKIE)
 
 
 async def login_against_helix(username: str, password: str) -> bool:
     """
-    LOCAL AUTH-LOGIK:
-    Verifiera användarens Helix-login genom att anropa JWT-login med username+password.
-    Vi använder bara statuskod 200/icke-200 för att avgöra om login lyckades.
+    LOCAL AUTH LOGIC:
+    Validate user's Helix credentials by calling JWT login with username+password.
+    We only check HTTP status code 200 vs non-200 to determine success.
 
-    OBS: tokenet som returneras används INTE för queries (vi kör impersonation via servicekonto).
+    NOTE: The returned token is NOT used for queries (we use impersonation via service account).
     """
+    logger.debug(f"Attempting Helix user login for '{username}'")
+
     async with httpx.AsyncClient(verify=False) as client:
         try:
             resp = await client.post(
@@ -183,12 +202,14 @@ async def login_against_helix(username: str, password: str) -> bool:
                 timeout=10.0,
             )
         except httpx.RequestError as e:
-            print("Error calling HELIX_JWT_LOGIN_URL for user login:", e)
+            logger.error(f"Error calling HELIX_JWT_LOGIN_URL for user login: {e}")
             return False
 
-    print("User login status:", resp.status_code)
+    logger.debug(f"User login status: {resp.status_code}")
     if resp.status_code != 200:
-        print("User login failed, body:", resp.text[:500])
+        logger.warning(
+            f"User login failed for '{username}', body: {resp.text[:500]}"
+        )
         return False
 
     return True
@@ -196,16 +217,18 @@ async def login_against_helix(username: str, password: str) -> bool:
 
 async def get_admin_token(force_refresh: bool = False) -> Optional[str]:
     """
-    Hämta AR-JWT-token för servicekontot (admin/service user) och cache:a det.
-    Om force_refresh=True loggar vi alltid in på nytt.
+    Retrieve AR-JWT token for the service account (admin/service user) and cache it.
+    If force_refresh=True we always log in again.
 
-    Detta token används tillsammans med X-AR-Impersonated-User (base64) för att köra
-    Helix-REST-anrop som respektive användare.
+    This token is used together with X-AR-Impersonated-User (base64 encoded) to
+    perform Helix REST calls "as" the actual user.
     """
     global _ADMIN_TOKEN
 
     if _ADMIN_TOKEN and not force_refresh:
         return _ADMIN_TOKEN
+
+    logger.info("Fetching new admin AR-JWT token from Helix...")
 
     async with httpx.AsyncClient(verify=False) as client:
         try:
@@ -216,49 +239,59 @@ async def get_admin_token(force_refresh: bool = False) -> Optional[str]:
                 timeout=10.0,
             )
         except httpx.RequestError as e:
-            print("Error calling HELIX_JWT_LOGIN_URL for admin login:", e)
+            logger.error(f"Error calling HELIX_JWT_LOGIN_URL for admin login: {e}")
             return None
 
-    print("Admin login status:", resp.status_code, "body:", resp.text[:200])
+    logger.debug(
+        f"Admin login status: {resp.status_code}, body: {resp.text[:200]}"
+    )
     if resp.status_code != 200:
+        logger.error("Admin login failed")
         _ADMIN_TOKEN = None
         return None
 
     token = resp.text.strip()
     if not token or len(token) < 10:
-        print("Admin login: token looks invalid:", token)
+        logger.error(f"Admin login: token looks invalid: {token[:20]}...")
         _ADMIN_TOKEN = None
         return None
 
     _ADMIN_TOKEN = token
+    logger.info("Admin AR-JWT token acquired successfully")
     return _ADMIN_TOKEN
 
 
 async def fetch_user_groups(username: str) -> Optional[str]:
     """
-    Hämtar "Group List"-fältet för en given användare från Helix User-formuläret.
+    Fetch the 'Group List' (or configured group field) for a given user
+    from the Helix User form.
 
-    Vi använder servicekontot (admin-token) och frågar mot:
-      GET /api/arsys/v1/entry/<HELIX_USER_FORM>?q='Login Name'="<username>"&fields=values(Group List)
+    Uses the service account (admin token) and queries:
+      GET /api/arsys/v1/entry/<HELIX_USER_FORM>
+          ?q='Login Name'="<username>"
+          &fields=values(Group List)
 
-    Om allt går vägen returneras strängen med grupper, t.ex. "1;400003;12321;".
-    Vid fel returneras None.
+    On success returns the group list string (e.g. "1;400003;12321;").
+    On failure returns None.
     """
     token = await get_admin_token()
     if not token:
-        print("fetch_user_groups: no admin token")
+        logger.error("fetch_user_groups: no admin token available")
         return None
 
-    # Bygg query-parametrar enligt Helix REST-syntax
-    # OBS: justera om ni har andra fältnamn/ID
+    # Build query parameters according to Helix REST syntax
     qualification = f"'{HELIX_USER_LOGIN_FIELD}'=\"{username}\""
     params = {
         "q": qualification,
-        # Be bara om det fält vi behöver
+        # Only request the field we need
         "fields": f"values({HELIX_USER_GROUP_FIELD})",
     }
 
     url = f"{HELIX_BASE_URL}/api/arsys/v1/entry/{HELIX_USER_FORM}"
+
+    logger.debug(
+        f"fetch_user_groups: Helix request for user '{username}' → {url} with q={qualification}"
+    )
 
     async with httpx.AsyncClient(verify=False) as client:
         try:
@@ -269,41 +302,47 @@ async def fetch_user_groups(username: str) -> Optional[str]:
                 timeout=15.0,
             )
         except httpx.RequestError as e:
-            print("fetch_user_groups: error calling Helix:", e)
+            logger.error(f"fetch_user_groups: error calling Helix: {e}")
             return None
 
     if resp.status_code != 200:
-        print("fetch_user_groups: Helix error", resp.status_code, resp.text[:500])
+        logger.error(
+            f"fetch_user_groups: Helix error {resp.status_code}, body={resp.text[:500]}"
+        )
         return None
 
     data = resp.json()
     entries = data.get("entries", [])
     if not entries:
-        print("fetch_user_groups: no entries for user", username)
+        logger.warning(f"fetch_user_groups: no entries for user {username}")
         return None
 
-    # Ta första matchningen
+    # Use the first match
     values = entries[0].get("values", {})
     group_list = values.get(HELIX_USER_GROUP_FIELD)
     if not group_list:
-        print("fetch_user_groups: no group field found for user", username)
+        logger.warning(
+            f"fetch_user_groups: no '{HELIX_USER_GROUP_FIELD}' field found for user {username}"
+        )
         return None
 
     if not isinstance(group_list, str):
         group_list = str(group_list)
 
+    logger.debug(
+        f"fetch_user_groups: user={username}, group_list={group_list}"
+    )
     return group_list
 
 
 def pick_role_from_groups(group_list: str) -> str:
     """
-    Tar en semikolonseparerad gruppsträng, t.ex. "1;400003;12321;"
-    och plockar ut bästa Grafana-roll enligt GROUP_ROLE_MAPPING + ROLE_PRIORITY.
+    Take a semicolon-separated group string, e.g. "1;400003;12321;",
+    and pick the best Grafana role according to GROUP_ROLE_MAPPING + ROLE_PRIORITY.
 
-    Exempel:
+    Example:
       GROUP_ROLE_MAPPING = {"400001": "Viewer", "400002": "Editor", "400003": "Admin"}
-
-      "1;400003;12321;" -> Admin (högsta prioritet)
+      group_list = "1;400003;12321;" -> Admin (highest priority)
     """
     best_role = HELIX_DEFAULT_GRAFANA_ROLE
     best_score = ROLE_PRIORITY.get(best_role, 0)
@@ -323,17 +362,17 @@ def pick_role_from_groups(group_list: str) -> str:
 
 async def get_grafana_role_for_user(username: str) -> str:
     """
-    Returnerar Grafana-roll för användare baserat på Helix-grupper.
+    Return Grafana role for a user based on Helix group membership.
 
-    Flöde:
-      - Kolla cache (_ROLE_CACHE)
-      - Om inte cachead:
-          * Läs "Group List" från Helix User-formuläret
-          * Mappa grupp-ID → roll via GROUP_ROLE_MAPPING
-          * Spara i cache och returnera
+    Flow:
+      - Check cache (_ROLE_CACHE)
+      - If not cached:
+          * Read group list from Helix User form
+          * Map group IDs → role via GROUP_ROLE_MAPPING
+          * Store in cache and return
 
-    Vid fel eller om inga grupper matchar:
-      - Returnera HELIX_DEFAULT_GRAFANA_ROLE (t.ex. "Viewer").
+    On error or if no groups match:
+      - Return HELIX_DEFAULT_GRAFANA_ROLE (e.g. "Viewer").
     """
     if username in _ROLE_CACHE:
         return _ROLE_CACHE[username]
@@ -341,34 +380,41 @@ async def get_grafana_role_for_user(username: str) -> str:
     group_list = await fetch_user_groups(username)
     if not group_list:
         role = HELIX_DEFAULT_GRAFANA_ROLE
-        print(f"get_grafana_role_for_user: no group list for {username}, using default {role}")
+        logger.warning(
+            f"get_grafana_role_for_user: no group list for {username}, using default {role}"
+        )
         _ROLE_CACHE[username] = role
         return role
 
     role = pick_role_from_groups(group_list)
-    print(f"get_grafana_role_for_user: user={username}, groups={group_list}, role={role}")
+    logger.info(
+        f"get_grafana_role_for_user: user={username}, groups={group_list}, role={role}"
+    )
     _ROLE_CACHE[username] = role
     return role
 
 
 async def proxy_to_grafana(path: str, request: Request) -> Response:
     """
-    Proxy för all Grafana-trafik (allt som inte är /login, /logout eller /helix-api/*):
+    Proxy all Grafana traffic (everything not /login, /logout or /helix-api/*):
 
-    - Hämtar användarnamn via resolve_username()
-    - Slår upp Grafana-roll baserat på Helix-grupper
-    - Sätter:
-        * X-WEBAUTH-USER  (vem användaren är)
-        * X-WEBAUTH-ROLE  (vilken grafana-roll användaren ska ha)
-    - Om ingen användare:
-        * AUTH_MODE=local → redirect till /login
-        * AUTH_MODE=rsso  → returnera 401 med enkel feltext
+    - Resolve username via resolve_username()
+    - Look up Grafana role based on Helix groups
+    - Set:
+        * X-WEBAUTH-USER  (who the user is)
+        * X-WEBAUTH-ROLE  (which Grafana role the user should have)
+    - If no user:
+        * AUTH_MODE=local → redirect to /login
+        * AUTH_MODE=rsso  → return 401 with a brief error message
     """
     username = resolve_username(request)
     if not username:
         if AUTH_MODE == "rsso":
-            # I RSSO-läge förväntas autentisering redan vara gjord av reverse proxy.
-            # Om vi inte ser användaren här, är något fel i RSSO-konfigurationen.
+            # In RSSO mode we expect authentication to be done by reverse proxy.
+            # If we cannot see the user here, RSSO configuration is most likely wrong.
+            logger.error(
+                "No user found in X-Grafana-User, RSSO header or cookie in RSSO mode"
+            )
             return HTMLResponse(
                 "Ingen användare hittades i varken X-Grafana-User, "
                 f"{RSSO_HEADER_NAME} eller {HELIX_USER_COOKIE}-cookie. "
@@ -376,24 +422,29 @@ async def proxy_to_grafana(path: str, request: Request) -> Response:
                 status_code=401,
             )
         else:
-            # Local-läge: skicka till vår egen login-sida.
+            # Local mode: send to our login page.
+            logger.info("No user in local mode → redirecting to /login")
             return RedirectResponse(url="/login", status_code=302)
 
-    # Hämta grafana-roll baserat på Helix-grupper
+    # Resolve Grafana role based on Helix groups
     role = await get_grafana_role_for_user(username)
 
-    # Bygg URL mot Grafana internt
+    # Build URL to Grafana internally
     url = f"{GRAFANA_INTERNAL_URL}/{path}".rstrip("/")
 
-    # Kopiera headers (utom Host) + auth-proxy headers
+    logger.debug(
+        f"Proxying request to Grafana path='{path}' as user='{username}' with role='{role}'"
+    )
+
+    # Copy headers (except Host) + auth proxy headers
     headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
     headers["X-WEBAUTH-USER"] = username
-    # Denna header plockas upp av Grafana via GF_AUTH_PROXY_HEADERS="Role:X-WEBAUTH-ROLE"
+    # This header is picked up by Grafana via GF_AUTH_PROXY_HEADERS="Role:X-WEBAUTH-ROLE"
     headers["X-WEBAUTH-ROLE"] = role
 
     body = await request.body()
 
-    async with httpx.AsyncClient(follow_redirects=False) as client:
+    async with httpx.AsyncClient(follow_redirects=False, verify=False) as client:
         grafana_resp = await client.request(
             method=request.method,
             url=url,
@@ -424,10 +475,9 @@ async def proxy_to_grafana(path: str, request: Request) -> Response:
 async def login_form(request: Request):
     """
     /login:
-    - I AUTH_MODE="local": visuell login-sida där användaren skriver Helix-username + password.
-      Vi validerar via HELIX_JWT_LOGIN_URL och sätter HLX_USER-cookie.
-    - I AUTH_MODE="rsso": här ska man normalt sett aldrig hamna, men om man gör det
-      visar vi bara ett kort meddelande.
+    - In AUTH_MODE="local": show the visual login page where the user enters
+      Helix username + password. We validate via HELIX_JWT_LOGIN_URL and set HLX_USER cookie.
+    - In AUTH_MODE="rsso": normally not used; if accessed, show a short info message.
     """
     if AUTH_MODE == "rsso":
         return HTMLResponse(
@@ -439,9 +489,10 @@ async def login_form(request: Request):
 
     username = get_cookie_user(request)
     if username:
+        logger.debug(f"User '{username}' already logged in → redirecting to /")
         return RedirectResponse(url="/", status_code=302)
 
-    # Snygg, responsiv login-sida (endast i local-läge)
+    # Fancy, responsive login page (only in local mode)
     html = """
     <!DOCTYPE html>
     <html lang="sv">
@@ -675,7 +726,7 @@ async def login_form(request: Request):
               </div>
               <h1>Helix Grafana Proxy</h1>
               <p class="subtitle">
-                Logga in med ditt <span>Helix-konto</span> för att komma åt dashboards.
+                Log in with your <span>Helix account</span> for dashboard access.
               </p>
             </div>
             <div class="brand-mark">
@@ -686,24 +737,24 @@ async def login_form(request: Request):
 
           <form method="post" action="/login">
             <div class="field">
-              <label for="username">Användarnamn</label>
+              <label for="username">Username</label>
               <input
                 type="text"
                 id="username"
                 name="username"
-                placeholder="t.ex. jdoe"
+                placeholder="ex. jdoe"
                 autocomplete="username"
                 required
               />
             </div>
 
             <div class="field">
-              <label for="password">Lösenord</label>
+              <label for="password">Password</label>
               <input
                 type="password"
                 id="password"
                 name="password"
-                placeholder="Ditt Helix-lösenord"
+                placeholder="Your Helix password"
                 autocomplete="current-password"
                 required
               />
@@ -712,12 +763,10 @@ async def login_form(request: Request):
             <div class="actions">
               <button type="submit">
                 <span class="button-icon">⮕</span>
-                <span>Logga in och öppna Grafana</span>
+                <span>Log in and open Grafana</span>
               </button>
               <p class="footnote">
-                Inloggningen används för att köra BMC Helix REST API-anrop
-                som <span>din användare</span> i Grafana (via impersonation)
-                och sätta rätt <span>Grafana-roll</span> baserat på Helix-grupper.
+                Powered by Python :)
               </p>
             </div>
           </form>
@@ -732,8 +781,8 @@ async def login_form(request: Request):
 @app.post("/login")
 async def login_submit(username: str = Form(...), password: str = Form(...)):
     """
-    Tar emot login-formen (endast i AUTH_MODE=local), verifierar Helix-credentials via JWT-login,
-    och sätter en cookie med Helix-loginName (HLX_USER).
+    Handle login form submission (only in AUTH_MODE=local), validate Helix
+    credentials via JWT login, and set a cookie with Helix login name (HLX_USER).
     """
     if AUTH_MODE == "rsso":
         return JSONResponse(
@@ -741,8 +790,11 @@ async def login_submit(username: str = Form(...), password: str = Form(...)):
             status_code=400,
         )
 
+    logger.info(f"Login attempt for user '{username}'")
+
     ok = await login_against_helix(username, password)
     if not ok:
+        logger.warning(f"Login failed for user '{username}'")
         html = """
         <html>
           <body>
@@ -753,8 +805,10 @@ async def login_submit(username: str = Form(...), password: str = Form(...)):
         """
         return HTMLResponse(content=html, status_code=401)
 
+    logger.info(f"User '{username}' logged in successfully")
+
     resp = RedirectResponse(url="/", status_code=302)
-    # I skarpt läge: sätt secure=True och samesite enligt din miljö
+    # In production: set secure=True and samesite according to your environment
     resp.set_cookie(HELIX_USER_COOKIE, username, httponly=False)
     return resp
 
@@ -762,8 +816,9 @@ async def login_submit(username: str = Form(...), password: str = Form(...)):
 @app.get("/logout")
 async def logout():
     """
-    Logga ut ur proxyn (ta bort vår egen user-cookie).
-    Gäller endast AUTH_MODE=local. I RSSO-läge hanteras utloggning normalt av RSSO själv.
+    Log out from the proxy (remove our own user cookie).
+    Applies only to AUTH_MODE=local. In RSSO mode, logout is normally
+    handled by RSSO itself.
     """
     resp = RedirectResponse(url="/login", status_code=302)
     resp.delete_cookie(HELIX_USER_COOKIE)
@@ -777,37 +832,40 @@ async def logout():
 @app.api_route("/helix-api/{form_name}", methods=["GET"])
 async def helix_form_proxy(form_name: str, request: Request):
     """
-    Generell, whitelistad proxy mot Helix-formulär:
+    Generic, whitelisted proxy against Helix forms:
 
-    - form_name måste finnas i HELIX_ALLOWED_FORMS
-    - varje anrop körs som aktuell användare via impersonation:
+    - form_name must exist in HELIX_ALLOWED_FORMS
+    - each call is executed as the current user via impersonation:
         Authorization: AR-JWT <admin-token>
         X-AR-Impersonated-User: base64(<username>)
 
-    - username kommer från resolve_username(), dvs:
+    - username is resolved via resolve_username(), meaning:
         * X-Grafana-User (dataproxy)
-        * ev. RSSO-header (AUTH_MODE=rsso)
-        * eller HLX_USER-cookie (AUTH_MODE=local)
+        * RSSO header (AUTH_MODE=rsso)
+        * or HLX_USER cookie (AUTH_MODE=local)
     """
     username = resolve_username(request)
     if not username:
+        logger.warning("helix_form_proxy: no logged in user")
         return JSONResponse({"error": "Not logged in to proxy"}, status_code=401)
 
     if form_name not in ALLOWED_FORMS:
+        logger.warning(f"helix_form_proxy: form '{form_name}' not in allowed list")
         return JSONResponse({"error": "Form not allowed"}, status_code=403)
 
     helix_url = f"{HELIX_BASE_URL}/api/arsys/v1/entry/{form_name}"
+    logger.debug(f"helix_form_proxy: user={username}, url={helix_url}")
 
-    # 1) Hämta ev. cache:ad admin-token
+    # 1) Get cached or fresh admin token
     token = await get_admin_token()
     if not token:
         return JSONResponse({"error": "Failed to get admin token"}, status_code=502)
 
-    # X-AR-Impersonated-User måste vara base64-kodad enligt BMC-dokumentation
+    # X-AR-Impersonated-User must be base64 encoded according to BMC documentation
     impersonated_b64 = base64.b64encode(username.encode("utf-8")).decode("ascii")
 
     async with httpx.AsyncClient(verify=False) as client:
-        # Första försök
+        # First attempt
         resp = await client.get(
             helix_url,
             headers={
@@ -818,9 +876,9 @@ async def helix_form_proxy(form_name: str, request: Request):
             timeout=15.0,
         )
 
-        # Om tokenen blivit ogiltig (401/403) → logga in admin på nytt & prova en gång till
+        # If token became invalid (401/403) → refresh admin login & retry once
         if resp.status_code in (401, 403):
-            print("Admin token possibly expired, refreshing...")
+            logger.warning("Admin token possibly expired, refreshing...")
             new_token = await get_admin_token(force_refresh=True)
             if not new_token:
                 return JSONResponse(
@@ -838,7 +896,10 @@ async def helix_form_proxy(form_name: str, request: Request):
             )
 
     if resp.status_code != 200:
-        print("Helix REST error:", resp.status_code, resp.text[:500])
+        logger.error(
+            f"Helix REST error for form '{form_name}' as user='{username}': "
+            f"status={resp.status_code}, body={resp.text[:500]}"
+        )
         return JSONResponse(
             {
                 "error": "Helix REST error",
@@ -850,13 +911,16 @@ async def helix_form_proxy(form_name: str, request: Request):
 
     return JSONResponse(resp.json())
 
+
 # =========================
 #  HEALTH CHECK
 # =========================
 
 @app.get("/healthz")
 async def healthz():
+    """Simple health endpoint for liveness/readiness checks."""
     return {"status": "ok"}
+
 
 # =========================
 #  CATCH-ALL → GRAFANA
@@ -865,8 +929,7 @@ async def healthz():
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def grafana_catch_all(path: str, request: Request):
     """
-    All trafik som inte matchar /login, /logout eller /helix-api/*
-    hamnar här och proxas vidare till Grafana.
+    All traffic that does not match /login, /logout or /helix-api/*
+    is proxied to Grafana.
     """
     return await proxy_to_grafana(path, request)
-

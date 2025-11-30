@@ -39,6 +39,11 @@ data:
   ###########################################
   # Helix REST-bas + JWT-login
   ###########################################
+  LOG_LEVEL: "INFO"
+
+  ###########################################
+  # Helix REST-bas + JWT-login
+  ###########################################
   HELIX_BASE_URL: "http://arserver:8008"
   HELIX_JWT_LOGIN_URL: "http://arserver:8008/api/jwt/login"
 
