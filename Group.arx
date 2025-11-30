@@ -1,0 +1,8 @@
+CHAR-SET windows-1252
+SCHEMA "Group"
+FIELDS "Application Floating License" "Assigned To" "Assignee Group" "Comments" "Group Definition" "Create Date" "Creator" "Datatag" "Overlay Group" "Parent Group" "Floating FTS Licenses" "Floating Licenses" "Group Category" "Group ID" "Group Name" "Group Number" "Groups" "Group Type" "Instance ID old" "Last Modified By" "Long Group Name" "Modified Date" "Notifier Listening" "Object ID" "Organization ID" "Parent Group" "Real Overlay Group" "Record ID" "Request ID" "Status" "Status History" "Unique Identifier" "Users" "z1D_Service"
+FLD-ID 139 4 112 9 121 3 2 301600300 137 135 116 115 120 106 105 20007 132 107 490000000 5 8 6 16 490000100 1405 134 136 379 1 7 15 179 133 304290290
+DTYPES  CHAR  CHAR  CHAR  CHAR  CHAR  TIME  CHAR  CHAR  CHAR  CHAR  INTEGER  INTEGER  ENUM  INTEGER  CHAR  CHAR  CHAR  ENUM  CHAR  CHAR  CHAR  TIME  ENUM  CHAR  CHAR  INTEGER  INTEGER  CHAR  CHAR  ENUM  CHAR  CHAR  CHAR  CHAR
+DATA "" "" "" "Grafana Role" "" 1764487581 "dice" "" "" "" 0 0 0 400001 "GRP_Grafana_Viewer" "" "" 1 "" "dice" "GRP_Grafana_Viewer" 1764487599 0 "" "" "" "" "AGGD859EFAN7WATG9D1XTG9D1XLPRL" "000000100007859" 0 "1764487581dice" "AGGD859EFAN7WATG9D1XTG9D1XLPRL" "" ""
+DATA "" "" "" "Grafana Role" "" 1764487617 "dice" "" "" "" 0 0 0 400002 "GRP_Grafana_Editor" "" "" 1 "" "dice" "GRP_Grafana_Editor" 1764487617 0 "" "" "" "" "AGGD859EFAN7WATG9D2XTG9D2XLPU3" "000000100007860" 0 "1764487617dice" "AGGD859EFAN7WATG9D1XTG9D1XLPRL" "" ""
+DATA "" "" "" "Grafana Role" "" 1764487630 "dice" "" "" "" 0 0 0 400003 "GRP_Grafana_Admin" "" "" 1 "" "dice" "GRP_Grafana_Admin" 1764487630 0 "" "" "" "" "AGGD859EFAN7WATG9D30TG9D30LPVI" "000000100007861" 0 "1764487630dice" "AGGD859EFAN7WATG9D1XTG9D1XLPRL" "" ""
