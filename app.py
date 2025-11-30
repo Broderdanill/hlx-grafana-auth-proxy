@@ -3,10 +3,12 @@ import base64
 import logging
 import asyncio
 import json
+import secrets
 from typing import Optional, Dict, List, Literal
 from pydantic import BaseModel, Field
+from urllib.parse import urlencode
 
-from fastapi import HTTPException, Depends, FastAPI, Request, Response, Form, WebSocket
+from fastapi import HTTPException, Depends, FastAPI, Request, Response, Form, WebSocket, Query
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
 import httpx
@@ -65,6 +67,32 @@ AUTH_MODE = os.getenv("AUTH_MODE", "local").lower()
 # RSSO_HEADER_NAME is only used when AUTH_MODE="rsso"
 # Reverse proxy in front of this app should set e.g. X-RSSO-USER: <loginName>
 RSSO_HEADER_NAME = os.getenv("RSSO_HEADER_NAME", "X-RSSO-USER")
+
+# =========================
+#  OIDC CONFIG (AUTH_MODE="oidc")
+# =========================
+# RSSO/HSSO will act as the OpenID Provider (OP).
+# This service (hlx-grafana-auth-proxy) is the OIDC client (RP).
+
+OIDC_ISSUER = os.getenv("OIDC_ISSUER")  # optional, for documentation
+OIDC_AUTH_URL = os.getenv("OIDC_AUTH_URL")  # e.g. https://hsso/realms/helix/protocol/openid-connect/auth
+OIDC_TOKEN_URL = os.getenv("OIDC_TOKEN_URL")  # .../token
+OIDC_USERINFO_URL = os.getenv("OIDC_USERINFO_URL")  # .../userinfo
+
+# These two come from Secret (not ConfigMap!)
+OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID")
+OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET")
+
+# Where the IdP will send the user back after login
+OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI")
+
+# Scopes and which claim we use as "login name"
+OIDC_SCOPE = os.getenv("OIDC_SCOPE", "openid profile email")
+OIDC_USERNAME_CLAIM = os.getenv("OIDC_USERNAME_CLAIM", "preferred_username")
+
+# Cookie to protect against CSRF in the auth code flow
+OIDC_STATE_COOKIE = "HLX_OIDC_STATE"
+
 
 # Whitelist of Helix forms (comma-separated)
 # Example: "User,Group,HPD:IncidentInterface"
@@ -257,6 +285,31 @@ def get_cookie_user(request: Request) -> Optional[str]:
     Used only for browser login (/login) in local mode.
     """
     return request.cookies.get(HELIX_USER_COOKIE)
+
+
+def build_oidc_authorization_url() -> tuple[str, str]:
+    """
+    Build the OIDC authorization URL and a random state value.
+
+    Used when AUTH_MODE="oidc" to redirect the browser to RSSO/HSSO.
+    """
+    if not (OIDC_AUTH_URL and OIDC_CLIENT_ID and OIDC_REDIRECT_URI):
+        logger.error("OIDC is not correctly configured (AUTH_URL / CLIENT_ID / REDIRECT_URI missing)")
+        raise HTTPException(status_code=500, detail="OIDC is not correctly configured")
+
+    state = secrets.token_urlsafe(32)
+
+    params = {
+        "response_type": "code",
+        "client_id": OIDC_CLIENT_ID,
+        "redirect_uri": OIDC_REDIRECT_URI,
+        "scope": OIDC_SCOPE,
+        "state": state,
+    }
+
+    url = f"{OIDC_AUTH_URL}?{urlencode(params)}"
+    logger.debug(f"OIDC authorization URL built: {url}")
+    return url, state
 
 
 async def login_against_helix(username: str, password: str) -> bool:
@@ -664,6 +717,107 @@ async def proxy_to_grafana(path: str, request: Request) -> Response:
 #  LOGIN / LOGOUT (LOCAL MODE)
 # =========================
 
+@app.get("/oidc/callback")
+async def oidc_callback(
+    request: Request,
+    code: str = Query(...),
+    state: Optional[str] = Query(None),
+):
+    """
+    OIDC callback endpoint.
+
+    Flow:
+      1) Verify state against cookie (CSRF protection)
+      2) Exchange code for tokens at OIDC_TOKEN_URL
+      3) Call OIDC_USERINFO_URL with access token
+      4) Read username from OIDC_USERNAME_CLAIM
+      5) Set HLX_USER cookie and redirect to "/"
+    """
+    if AUTH_MODE != "oidc":
+        logger.warning("Received /oidc/callback but AUTH_MODE is not 'oidc'")
+        return HTMLResponse("OIDC mode is not enabled", status_code=400)
+
+    cookie_state = request.cookies.get(OIDC_STATE_COOKIE)
+    if cookie_state and state and cookie_state != state:
+        logger.error(f"OIDC state mismatch: cookie={cookie_state}, query={state}")
+        return HTMLResponse("Invalid OIDC state", status_code=400)
+
+    if not (OIDC_TOKEN_URL and OIDC_USERINFO_URL and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET):
+        logger.error("OIDC token/userinfo endpoints or client credentials are not configured")
+        return HTMLResponse("OIDC configuration error", status_code=500)
+
+    # 1) Exchange code for token
+    async with httpx.AsyncClient(verify=False) as client:
+        try:
+            token_resp = await client.post(
+                OIDC_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": OIDC_REDIRECT_URI,
+                    "client_id": OIDC_CLIENT_ID,
+                    "client_secret": OIDC_CLIENT_SECRET,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10.0,
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Error calling OIDC token endpoint: {e}")
+            return HTMLResponse("OIDC token request failed", status_code=502)
+
+    if token_resp.status_code != 200:
+        logger.error(f"OIDC token endpoint error: {token_resp.status_code} {token_resp.text[:500]}")
+        return HTMLResponse("OIDC token endpoint error", status_code=502)
+
+    token_data = token_resp.json()
+    access_token = token_data.get("access_token")
+    if not access_token:
+        logger.error(f"No access_token in OIDC token response: {token_data}")
+        return HTMLResponse("OIDC token response missing access_token", status_code=502)
+
+    # 2) Fetch userinfo
+    async with httpx.AsyncClient(verify=False) as client:
+        try:
+            userinfo_resp = await client.get(
+                OIDC_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10.0,
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Error calling OIDC userinfo endpoint: {e}")
+            return HTMLResponse("OIDC userinfo request failed", status_code=502)
+
+    if userinfo_resp.status_code != 200:
+        logger.error(f"OIDC userinfo endpoint error: {userinfo_resp.status_code} {userinfo_resp.text[:500]}")
+        return HTMLResponse("OIDC userinfo endpoint error", status_code=502)
+
+    userinfo = userinfo_resp.json()
+    username = (
+        userinfo.get(OIDC_USERNAME_CLAIM)
+        or userinfo.get("preferred_username")
+        or userinfo.get("sub")
+    )
+
+    if not username:
+        logger.error(f"Could not extract username from userinfo: {userinfo}")
+        return HTMLResponse("OIDC userinfo response missing username", status_code=502)
+
+    logger.info(f"OIDC login successful for user '{username}'")
+
+    # 3) Set cookie + redirect to root (Grafana UI)
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(
+        HELIX_USER_COOKIE,
+        username,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    # Clear state cookie
+    response.delete_cookie(OIDC_STATE_COOKIE)
+    return response
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_form(request: Request):
     """
@@ -671,20 +825,43 @@ async def login_form(request: Request):
     - In AUTH_MODE="local": show the visual login page where the user enters
       Helix username + password. We validate via HELIX_JWT_LOGIN_URL and set HLX_USER cookie.
     - In AUTH_MODE="rsso": normally not used; if accessed, show a short info message.
+    - In AUTH_MODE="oidc": start OIDC authorization code flow against RSSO/HSSO.
     """
     if AUTH_MODE == "rsso":
         return HTMLResponse(
             "<h2>RSSO-läge är aktiverat</h2>"
             "<p>Autentisering hanteras av RSSO / reverse proxy framför denna tjänst."
-            " /login används endast i AUTH_MODE=local.</p>",
+            " /login används endast i AUTH_MODE=local eller AUTH_MODE=oidc.</p>",
             status_code=200,
         )
 
+    if AUTH_MODE == "oidc":
+        # If user already has a cookie, just go to Grafana
+        username = get_cookie_user(request)
+        if username:
+            logger.debug(f"User '{username}' already logged in via OIDC → redirecting to /")
+            return RedirectResponse(url="/", status_code=302)
+
+        # Otherwise start OIDC flow
+        auth_url, state = build_oidc_authorization_url()
+        logger.info(f"Starting OIDC login, redirecting to IdP, state={state}")
+
+        response = RedirectResponse(url=auth_url, status_code=302)
+        # Protect against CSRF: store state in a secure cookie
+        response.set_cookie(
+            OIDC_STATE_COOKIE,
+            state,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+        )
+        return response
+
+    # AUTH_MODE="local" (default) – existing behavior
     username = get_cookie_user(request)
     if username:
         logger.debug(f"User '{username}' already logged in → redirecting to /")
         return RedirectResponse(url="/", status_code=302)
-
     # Fancy, responsive login page (only in local mode)
     html = """
     <!DOCTYPE html>

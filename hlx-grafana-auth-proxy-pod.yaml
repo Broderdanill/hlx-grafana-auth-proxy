@@ -101,15 +101,40 @@ data:
   # Authentication mode for the proxy:
   #
   #  - local (default): own login page against Helix JWT login
-  #  - rsso: user is authenticated by RSSO in front of this app,
-  #          this service reads the username from RSSO_HEADER_NAME
+  #  - rsso:  header-based auth, username from RSSO_HEADER_NAME
+  #  - oidc:  this service is an OIDC client towards RSSO/HSSO
   #
-  # For RSSO mode:
+  # For RSSO header mode:
   #   AUTH_MODE: "rsso"
-  #   RSSO_HEADER_NAME: "X-RSSO-USER"  (or whatever your proxy sets)
+  #   RSSO_HEADER_NAME: "X-RSSO-USER"
+  #
+  # For OIDC mode:
+  #   AUTH_MODE: "oidc"
+  #   OIDC_* variables below must be configured
   ###########################################
   AUTH_MODE: "local"
   RSSO_HEADER_NAME: "X-RSSO-USER"
+
+  ###########################################
+  # OIDC configuration (used when AUTH_MODE="oidc")
+  #
+  # RSSO/HSSO is the OpenID Provider (OP).
+  # This container is the OIDC client (RP).
+  #
+  # NOTE: OIDC_CLIENT_ID and OIDC_CLIENT_SECRET are stored
+  #       in a Secret (see helix-oidc-credentials).
+  ###########################################
+  OIDC_ISSUER: "https://hsso.example.com/realms/helix"
+  OIDC_AUTH_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/auth"
+  OIDC_TOKEN_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/token"
+  OIDC_USERINFO_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/userinfo"
+
+  # Must match what you configure in RSSO/HSSO client + DNS/front-end:
+  OIDC_REDIRECT_URI: "https://grafana.example.com/oidc/callback"
+
+  # Optional tuning:
+  OIDC_SCOPE: "openid profile email"
+  OIDC_USERNAME_CLAIM: "preferred_username"
 ---
 #############################################
 # Secret: Helix service account (admin user)
@@ -134,6 +159,18 @@ stringData:
   # Lägg till dessa två – de MÅSTE matcha Grafana-containerns GF_SECURITY_ADMIN_*
   GRAFANA_ADMIN_USER: "admin"
   GRAFANA_ADMIN_PASSWORD: "changeme"
+---
+#############################################
+# OIDC Credentials
+#############################################
+apiVersion: v1
+kind: Secret
+metadata:
+  name: helix-oidc-credentials
+type: Opaque
+stringData:
+  OIDC_CLIENT_ID: "grafana-helix-proxy"
+  OIDC_CLIENT_SECRET: "super-hemligt-oidc-lösen"
 ---
 #############################################
 # PersistentVolumeClaim: Grafana Storage
@@ -247,6 +284,8 @@ spec:
         # ...and load sensitive values from Secret
         - secretRef:
             name: helix-admin-credentials
+        - secretRef:
+            name: helix-oidc-credentials
 
       ports:
         - containerPort: 8080
