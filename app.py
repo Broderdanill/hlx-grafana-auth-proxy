@@ -114,15 +114,31 @@ def parse_group_role_mapping(value: str) -> Dict[str, str]:
 
 
 ALLOWED_FORMS = parse_form_whitelist(RAW_ALLOWED_FORMS)
-GROUP_ROLE_MAPPING = parse_group_role_mapping(RAW_GROUP_ROLE_MAPPING)
+ALL_GROUP_MAPPING = parse_group_role_mapping(RAW_GROUP_ROLE_MAPPING)
+
+GRAFANA_ORG_ROLES = {"Viewer", "Editor", "Admin"}
+
+# Only mappings that point to a Grafana org role
+GROUP_ROLE_MAPPING = {
+    gid: role for gid, role in ALL_GROUP_MAPPING.items() if role in GRAFANA_ORG_ROLES
+}
+
+# All other mappings are treated as "Grafana groups" (used for teams/folder permissions)
+GROUP_TEAM_MAPPING: Dict[str, str] = {
+    gid: group_name
+    for gid, group_name in ALL_GROUP_MAPPING.items()
+    if group_name not in GRAFANA_ORG_ROLES
+}
 
 logger.info(f"Allowed Helix forms: {ALLOWED_FORMS}")
 logger.info(f"AUTH_MODE: {AUTH_MODE}, RSSO_HEADER_NAME: {RSSO_HEADER_NAME}")
-logger.debug(f"GROUP_ROLE_MAPPING: {GROUP_ROLE_MAPPING}")
+logger.debug(f"GROUP_ROLE_MAPPING (org roles): {GROUP_ROLE_MAPPING}")
+logger.debug(f"GROUP_TEAM_MAPPING (grafana groups): {GROUP_TEAM_MAPPING}")
 logger.debug(f"HELIX_USER_FORM: {HELIX_USER_FORM}")
 logger.debug(f"HELIX_USER_LOGIN_FIELD: {HELIX_USER_LOGIN_FIELD}")
 logger.debug(f"HELIX_USER_GROUP_FIELD: {HELIX_USER_GROUP_FIELD}")
 logger.info(f"HELIX_DEFAULT_GRAFANA_ROLE: {HELIX_DEFAULT_GRAFANA_ROLE}")
+
 
 app = FastAPI()
 
@@ -131,6 +147,12 @@ _ADMIN_TOKEN: Optional[str] = None
 
 # Cache for Grafana role per user (username -> role)
 _ROLE_CACHE: Dict[str, str] = {}
+
+# Cache for user group list (raw Helix group string)
+_GROUP_LIST_CACHE: Dict[str, str] = {}
+
+# Cache for Grafana "groups" header per user (comma-separated string)
+_TEAM_CACHE: Dict[str, str] = {}
 
 # Simple priority for roles if user has multiple groups
 ROLE_PRIORITY = {
@@ -337,6 +359,20 @@ async def fetch_user_groups(username: str) -> Optional[str]:
     )
     return group_list
 
+async def get_user_group_list(username: str) -> Optional[str]:
+    """
+    Return the cached Helix group list for a user if available,
+    otherwise fetch it from Helix and cache it.
+    """
+    if username in _GROUP_LIST_CACHE:
+        return _GROUP_LIST_CACHE[username]
+
+    group_list = await fetch_user_groups(username)
+    if group_list:
+        _GROUP_LIST_CACHE[username] = group_list
+    return group_list
+
+
 
 def pick_role_from_groups(group_list: str) -> str:
     """
@@ -362,25 +398,66 @@ def pick_role_from_groups(group_list: str) -> str:
 
     return best_role
 
+def pick_teams_from_groups(group_list: str) -> list[str]:
+    """
+    Extract Grafana "team/group tags" from a semicolon-separated Helix group string.
+
+    Example:
+      GROUP_TEAM_MAPPING = {"410001": "GrafanaRole01"}
+      group_list = "1;400003;410001;12321;"
+      -> ["GrafanaRole01"]
+    """
+    teams = set()
+    parts = [p.strip() for p in group_list.split(";") if p.strip()]
+    for gid in parts:
+        team = GROUP_TEAM_MAPPING.get(gid)
+        if team:
+            teams.add(team)
+    return sorted(teams)
+
+
+async def get_grafana_groups_for_user(username: str) -> str:
+    """
+    Return a comma-separated list of Grafana "groups" for a user, based on
+    GROUP_TEAM_MAPPING and the user's Helix group membership.
+
+    The returned string is intended to be sent in a header, e.g.:
+      X-WEBAUTH-GROUPS: GrafanaRole01,GrafanaRoleSecOps
+    """
+    if username in _TEAM_CACHE:
+        return _TEAM_CACHE[username]
+
+    group_list = await get_user_group_list(username)
+    if not group_list:
+        logger.info(
+            f"get_grafana_groups_for_user: no group list for {username}, no grafana groups"
+        )
+        groups_header = ""
+        _TEAM_CACHE[username] = groups_header
+        return groups_header
+
+    teams = pick_teams_from_groups(group_list)
+    groups_header = ",".join(teams)
+    logger.info(
+        f"get_grafana_groups_for_user: user={username}, teams={groups_header}"
+    )
+    _TEAM_CACHE[username] = groups_header
+    return groups_header
+
 
 async def get_grafana_role_for_user(username: str) -> str:
     """
-    Return Grafana role for a user based on Helix group membership.
+    Return Grafana org role for a user based on Helix group membership.
 
-    Flow:
-      - Check cache (_ROLE_CACHE)
-      - If not cached:
-          * Read group list from Helix User form
-          * Map group IDs → role via GROUP_ROLE_MAPPING
-          * Store in cache and return
-
-    On error or if no groups match:
-      - Return HELIX_DEFAULT_GRAFANA_ROLE (e.g. "Viewer").
+    Uses GROUP_ROLE_MAPPING (Helix group ID → Viewer/Editor/Admin).
+    Falls back to HELIX_DEFAULT_GRAFANA_ROLE if:
+      - no group list is found, or
+      - none of the groups map to a known org role.
     """
     if username in _ROLE_CACHE:
         return _ROLE_CACHE[username]
 
-    group_list = await fetch_user_groups(username)
+    group_list = await get_user_group_list(username)
     if not group_list:
         role = HELIX_DEFAULT_GRAFANA_ROLE
         logger.warning(
@@ -395,6 +472,7 @@ async def get_grafana_role_for_user(username: str) -> str:
     )
     _ROLE_CACHE[username] = role
     return role
+
 
 
 async def proxy_to_grafana(path: str, request: Request) -> Response:
@@ -429,14 +507,16 @@ async def proxy_to_grafana(path: str, request: Request) -> Response:
             logger.info("No user in local mode → redirecting to /login")
             return RedirectResponse(url="/login", status_code=302)
 
-    # Resolve Grafana role based on Helix groups
+    # Resolve Grafana role + extra Grafana groups based on Helix groups
     role = await get_grafana_role_for_user(username)
+    groups_header = await get_grafana_groups_for_user(username)
 
     # Build URL to Grafana internally
     url = f"{GRAFANA_INTERNAL_URL}/{path}".rstrip("/")
 
     logger.debug(
-        f"Proxying request to Grafana path='{path}' as user='{username}' with role='{role}'"
+        f"Proxying request to Grafana path='{path}' as user='{username}' "
+        f"with role='{role}' and groups='{groups_header}'"
     )
 
     # Copy headers (except Host) + auth proxy headers
@@ -444,6 +524,10 @@ async def proxy_to_grafana(path: str, request: Request) -> Response:
     headers["X-WEBAUTH-USER"] = username
     # This header is picked up by Grafana via GF_AUTH_PROXY_HEADERS="Role:X-WEBAUTH-ROLE"
     headers["X-WEBAUTH-ROLE"] = role
+    # Optional: send comma-separated grafana groups
+    if groups_header:
+        headers["X-WEBAUTH-GROUPS"] = groups_header
+
 
     body = await request.body()
 

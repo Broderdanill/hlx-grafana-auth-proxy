@@ -186,6 +186,11 @@
               "jsonPath": "entries[*].values.License Type",
               "language": "jsonpath",
               "name": ""
+            },
+            {
+              "jsonPath": "entries[*].values.Email Address",
+              "language": "jsonpath",
+              "name": ""
             }
           ],
           "method": "GET",
@@ -194,7 +199,7 @@
           "urlPath": "/User"
         }
       ],
-      "title": "New panel",
+      "title": "All Users",
       "type": "table"
     }
   ],
@@ -205,12 +210,12 @@
     "list": []
   },
   "time": {
-    "from": "now/y",
-    "to": "now/y"
+    "from": "now-5m",
+    "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "User (Test)",
+  "title": "User",
   "uid": "diwkt7z",
-  "version": 7
+  "version": 13
 }

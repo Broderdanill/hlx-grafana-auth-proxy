@@ -82,7 +82,7 @@ RSSO_HEADER_NAME=X-RSSO-USER
 2. Your reverse proxy must set the header with the Helix username.
 
 
-## Grafana - Data Source
+## Grafana - Queries with Configured Data Source
 This default set up is using "marcusolsson-json-datasource" as data source
 Below are some examples on how to use it.
 
@@ -95,17 +95,6 @@ Path defines the AR Form Name, for example:
 The data source will get the complete json, therefor we need to specify correct path, for example:
 entries[*].values.Full Name   -  Full Name Field in User Form
 
-JSONata
-JSONata är ett uttrycksspråk för att transformera JSON-data.
-Tänk:
 
-JSON → transformera → nytt JSON
-filtrera
-gruppera
-mappa om fält
-räkna saker
-skapa nya objekt
-slå ihop fält
-summera
-byta struktur helt
-Och JSON API-pluginet låter dig köra JSONata direkt på resultatet från din HTTP-endpoint.
+### Recommended Transformation
+One of the most used is "Group by"

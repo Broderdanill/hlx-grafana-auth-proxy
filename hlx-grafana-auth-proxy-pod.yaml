@@ -70,7 +70,8 @@ data:
   #  400002 → Editor
   #  400003 → Admin
   ###########################################
-  HELIX_GROUP_ROLE_MAPPING: "400001:Viewer,400002:Editor,400003:Admin"
+  HELIX_GROUP_ROLE_MAPPING: "400001:Viewer,400002:Editor,400003:Admin,410001:GrafanaRole01,410002:GrafanaRole02"
+
 
   ###########################################
   # Form + fields used to read the user's group list
@@ -193,7 +194,7 @@ spec:
 
         # Map Role attribute from HTTP header X-WEBAUTH-ROLE
         - name: GF_AUTH_PROXY_HEADERS
-          value: "Role:X-WEBAUTH-ROLE"
+          value: "Role:X-WEBAUTH-ROLE,Groups:X-WEBAUTH-GROUPS"
 
         # Important: also send Grafana username back to the data source
         # in header X-Grafana-User (used by the FastAPI proxy for impersonation)
