@@ -112,7 +112,7 @@ data:
   #   AUTH_MODE: "oidc"
   #   OIDC_* variables below must be configured
   ###########################################
-  AUTH_MODE: "local"
+  AUTH_MODE: "oidc"
   RSSO_HEADER_NAME: "X-RSSO-USER"
 
   ###########################################
@@ -124,17 +124,18 @@ data:
   # NOTE: OIDC_CLIENT_ID and OIDC_CLIENT_SECRET are stored
   #       in a Secret (see helix-oidc-credentials).
   ###########################################
-  OIDC_ISSUER: "https://hsso.example.com/realms/helix"
-  OIDC_AUTH_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/auth"
-  OIDC_TOKEN_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/token"
-  OIDC_USERINFO_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/userinfo"
+  OIDC_ISSUER: "http://ars.sandbox:8082/realms/ars"
+  OIDC_AUTH_URL: "http://ars.sandbox:8082/realms/ars/protocol/openid-connect/auth"
+  OIDC_TOKEN_URL: "http://ars.sandbox:8082/realms/ars/protocol/openid-connect/token"
+  OIDC_USERINFO_URL: "http://ars.sandbox:8082/realms/ars/protocol/openid-connect/userinfo"
 
   # Must match what you configure in RSSO/HSSO client + DNS/front-end:
-  OIDC_REDIRECT_URI: "https://grafana.example.com/oidc/callback"
+  OIDC_REDIRECT_URI: "http://ars.sandbox:8081/oidc/callback"
 
   # Optional tuning:
   OIDC_SCOPE: "openid profile email"
   OIDC_USERNAME_CLAIM: "preferred_username"
+
 
   # Secure Cookie Setting
   SECURE_COOKIES: "false"
@@ -172,8 +173,8 @@ metadata:
   name: helix-oidc-credentials
 type: Opaque
 stringData:
-  OIDC_CLIENT_ID: "grafana-helix-proxy"
-  OIDC_CLIENT_SECRET: "super-hemligt-oidc-lösen"
+  OIDC_CLIENT_ID: "c349c938-3355-49b0-b297-24dabb164d87"
+  OIDC_CLIENT_SECRET: "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDBFQB6cyHdRLhRDZzO6vvpp88/aN9QhPxEbW9GYZmVhoVPl9p3QvMsX1JDvm/Wu+zqkeZ21zglfXxWHyll/B7MQdEMSrJkUhfcnDJys5T7tsZtMaJjbF0Q9cBlusQztphqSCGb8lKuYAMM32+twZSrynfYtTl1A7nxv0UpMr6xa/kgKt+Sfyg2Ejm4dCpjr33L1Oq+PU6kp8WitvChDUs7Tro7o92lwB67UjiV9g49g49DAXxLdBfmPNGcnYOgHOL7r/13zjendkJRjH2qjSrgLEprnYkbNPktJHEA8dR3pL3LQ1HPnW+ljC/CJn6NieI/ufHmuRhXymwGowH32mDRAgMBAAECggEABs9eUnNQHPVJCPbRcozgMLgN+78PrU/bc/BmLdXQbHEvr4R8HJu8ZvK/vIrxd+Ht88IMnmFt5gicg48azzGKxoqFvIi/7QDmPY42y0vhM9WY/w3ym84dJDV+wTfKpsZIbus3YEA2QVc6lFAnKLo8q6h6/KY7rhBhFRE5d8AF8Mz976t23v8Ms0a/38znmzEKdi9ki91La3cgJYnF/pj++iSpnd18l86X/GZtlAIXHRRrRNwzEeU3bwZMOEZtmyVLcyQktt6UE6qP43IwZk3l9JxFHkAxmniuIl4KZe40ZBvgDMVL8RUE/OX6KSoMqHH8VWO9+ElL0xDzNiRPolnDSQKBgQDhWgCNA8hvBIQPnCb/icPgy9uUvAGkN3j+iqKO8mJGku5szuBTJ8SoRMPmGumxNJAqs/IMgzxVlLQe9j+4N8QhwTbWmZID1WMLtfQXqd5N76XoqeveY3hWfiaAQkpFyNWGTu8ddlyqxcmHIYn/12gB1sqh2edkSPyw7TRqk+VHPQKBgQDbV3sqeFnWVxr3mk4CI8ZUKAbEO4I83YjACxNFO9Ia2Qkc6bwDu0MWAAHINzHk9mV7kGSOZOXu7J1TZXM86zWi48zzXh6jUcFOo8hCggG7KN874Kts9LqhWWrx6SveY3g0XlUfUcgZOEEEwZd5um+JijT9iak2NHva/D8o1+y5JQKBgQDYEwtKKuFpiYPyz8AY74iQqAdAYtCUG9h5AIcD12bh0oqoa+ht80i+K0lG/nEqx4KgX2/sDX2xdWcL9QN96IK39uJU/GUkJdvVY77LXcZZJjsHjr4pu2isTkMuYeGDbiFGqbLephoOaJ1mY4NFe84vTTt3207iOpWIM7k5o9uI5QKBgQCY4jEHOTvlGnHBg9w7wZPLtNqCjLgKlJ9svEuCRl/8NqsTbBeQwkXQX9DeLRqp7NRvfAWa+tkJ4AMIzf20yH1qPD3uo/vW+nUyyxYaxWNPgP2YTtEt8KblL95LH6tkJxDx746FdgtzCLLJDeb3AewcgijNT9aR4aMyz/92CIsHwQKBgQC/6D5uZuErUVpTHlyhY4S3HY4O63PBsw49wrRRkhoXH7WSkGRu2f1j7JFqpVF+8acV1Z1jvzGWbbqLQAc3oU3PRzermFo6NDWDhkuNxmsOu/GtQvLY1FK1Hj4ClnNfBy3eVwOZePKOGNKMeo/kfcNXXeUTAF4oycxjGT68ofQV3A=="
 ---
 #############################################
 # PersistentVolumeClaim: Grafana Storage

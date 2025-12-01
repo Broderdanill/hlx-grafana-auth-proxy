@@ -93,6 +93,9 @@ OIDC_USERNAME_CLAIM = os.getenv("OIDC_USERNAME_CLAIM", "preferred_username")
 # Cookie to protect against CSRF in the auth code flow
 OIDC_STATE_COOKIE = "HLX_OIDC_STATE"
 
+# Setting for secure cookie
+SECURE_COOKIES = os.getenv("SECURE_COOKIES", "true").lower() == "true"
+
 
 # Whitelist of Helix forms (comma-separated)
 # Example: "User,Group,HPD:IncidentInterface"
@@ -810,7 +813,7 @@ async def oidc_callback(
         HELIX_USER_COOKIE,
         username,
         httponly=True,
-        secure=True,
+        secure=SECURE_COOKIES,
         samesite="lax",
     )
     # Clear state cookie
