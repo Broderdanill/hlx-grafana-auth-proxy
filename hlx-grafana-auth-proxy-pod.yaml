@@ -115,7 +115,7 @@ data:
   AUTH_MODE: "local"
   RSSO_HEADER_NAME: "X-RSSO-USER"
 
-  ###########################################
+ ###########################################
   # OIDC configuration (used when AUTH_MODE="oidc")
   #
   # RSSO/HSSO is the OpenID Provider (OP).
@@ -124,20 +124,23 @@ data:
   # NOTE: OIDC_CLIENT_ID and OIDC_CLIENT_SECRET are stored
   #       in a Secret (see helix-oidc-credentials).
   ###########################################
-  OIDC_ISSUER: "https://hsso.example.com/realms/helix"
-  OIDC_AUTH_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/auth"
-  OIDC_TOKEN_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/token"
-  OIDC_USERINFO_URL: "https://hsso.example.com/realms/helix/protocol/openid-connect/userinfo"
+  OIDC_ISSUER: "http://ars.sandbox:8082/realms/ars"
+  # EXTERNAL
+  OIDC_AUTH_URL: "http://ars.sandbox:8082/rsso/oauth2/authorize"
+  # INTERNAL (Container -> Container)
+  OIDC_TOKEN_URL: "http://rsso-int:8080/rsso/oauth2/token"
+  OIDC_USERINFO_URL: "http://rsso-int:8080/rsso/oauth2/userinfo"
 
+  # EXTERNAL
   # Must match what you configure in RSSO/HSSO client + DNS/front-end:
-  OIDC_REDIRECT_URI: "https://grafana.example.com/oidc/callback"
+  OIDC_REDIRECT_URI: "http://ars.sandbox:8081/oidc/callback"
 
   # Optional tuning:
   OIDC_SCOPE: "openid profile email"
   OIDC_USERNAME_CLAIM: "preferred_username"
 
-  # Secure Cookie Setting
-  SECURE_COOKIES: "false"
+  # Secure Cookie Setting, default = "true", use false when testing with sandbox without https
+  SECURE_COOKIES: "true"
 ---
 #############################################
 # Secret: Helix service account (admin user)

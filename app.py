@@ -855,7 +855,7 @@ async def login_form(request: Request):
             OIDC_STATE_COOKIE,
             state,
             httponly=True,
-            secure=True,
+            secure=SECURE_COOKIES,
             samesite="lax",
         )
         return response

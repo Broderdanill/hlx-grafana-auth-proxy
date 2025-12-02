@@ -125,10 +125,13 @@ data:
   #       in a Secret (see helix-oidc-credentials).
   ###########################################
   OIDC_ISSUER: "http://ars.sandbox:8082/realms/ars"
-  OIDC_AUTH_URL: "http://ars.sandbox:8082/realms/ars/protocol/openid-connect/auth"
-  OIDC_TOKEN_URL: "http://ars.sandbox:8082/realms/ars/protocol/openid-connect/token"
-  OIDC_USERINFO_URL: "http://ars.sandbox:8082/realms/ars/protocol/openid-connect/userinfo"
+  # EXTERNAL
+  OIDC_AUTH_URL: "http://ars.sandbox:8082/rsso/oauth2/authorize"
+  # INTERNAL (Container -> Container)
+  OIDC_TOKEN_URL: "http://rsso-int:8080/rsso/oauth2/token"
+  OIDC_USERINFO_URL: "http://rsso-int:8080/rsso/oauth2/userinfo"
 
+  # EXTERNAL
   # Must match what you configure in RSSO/HSSO client + DNS/front-end:
   OIDC_REDIRECT_URI: "http://ars.sandbox:8081/oidc/callback"
 
@@ -137,7 +140,7 @@ data:
   OIDC_USERNAME_CLAIM: "preferred_username"
 
 
-  # Secure Cookie Setting
+  # Secure Cookie Setting, default = "true", use false when testing with sandbox without https
   SECURE_COOKIES: "false"
 ---
 #############################################
